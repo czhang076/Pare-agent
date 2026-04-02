@@ -1,0 +1,113 @@
+"""LLM adapter layer — provider-agnostic interface for all LLM interactions."""
+
+from forge.llm.base import (
+    ContentBlock,
+    LLMAdapter,
+    LLMResponse,
+    Message,
+    ModelProfile,
+    StopReason,
+    StreamChunk,
+    TokenUsage,
+    ToolCallRequest,
+    get_profile,
+)
+from forge.llm.output_parser import ParseError, parse_json_response
+from forge.llm.retry import RetryPolicy
+
+__all__ = [
+    "ContentBlock",
+    "LLMAdapter",
+    "LLMResponse",
+    "Message",
+    "ModelProfile",
+    "ParseError",
+    "RetryPolicy",
+    "StopReason",
+    "StreamChunk",
+    "TokenUsage",
+    "ToolCallRequest",
+    "create_llm",
+    "get_profile",
+    "parse_json_response",
+]
+
+
+# ---------------------------------------------------------------------------
+# Provider presets — maps provider name to (adapter_class, default_kwargs)
+# ---------------------------------------------------------------------------
+
+_PROVIDER_PRESETS: dict[str, dict] = {
+    "minimax": {
+        "base_url": "https://api.minimax.io/v1",
+        "default_model": "MiniMax-M2.5",
+    },
+    "openrouter": {
+        "base_url": "https://openrouter.ai/api/v1",
+        "default_model": "deepseek/deepseek-chat",
+    },
+}
+
+
+def create_llm(
+    provider: str,
+    model: str | None = None,
+    *,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    temperature: float = 0.0,
+    max_tokens: int = 4096,
+    profile: ModelProfile | None = None,
+    retry_policy: RetryPolicy | None = None,
+) -> LLMAdapter:
+    """Factory function to create an LLM adapter by provider name.
+
+    Providers:
+        "anthropic" → AnthropicAdapter (direct SDK)
+        "openai"    → OpenAIAdapter (direct SDK)
+        "minimax"   → OpenAIAdapter with base_url="https://api.minimax.io/v1"
+        "openrouter" → OpenAIAdapter with base_url="https://openrouter.ai/api/v1"
+
+    For custom endpoints (local vLLM, etc.), use provider="openai" with
+    a custom base_url.
+
+    Usage:
+        # MiniMax
+        llm = create_llm("minimax", model="MiniMax-M2.5", api_key="...")
+
+        # Anthropic
+        llm = create_llm("anthropic", model="claude-sonnet-4-20250514")
+
+        # Local vLLM
+        llm = create_llm("openai", model="my-model", base_url="http://localhost:8000/v1")
+    """
+    provider = provider.lower()
+
+    if provider == "anthropic":
+        from forge.llm.anthropic_adapter import AnthropicAdapter
+
+        return AnthropicAdapter(
+            model=model or "claude-sonnet-4-20250514",
+            profile=profile,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            api_key=api_key,
+            retry_policy=retry_policy,
+        )
+
+    # All OpenAI-compatible providers
+    from forge.llm.openai_adapter import OpenAIAdapter
+
+    preset = _PROVIDER_PRESETS.get(provider, {})
+    resolved_base_url = base_url or preset.get("base_url")
+    resolved_model = model or preset.get("default_model", "gpt-4o")
+
+    return OpenAIAdapter(
+        model=resolved_model,
+        profile=profile,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        api_key=api_key,
+        base_url=resolved_base_url,
+        retry_policy=retry_policy,
+    )
