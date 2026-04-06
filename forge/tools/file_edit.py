@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import difflib
 import logging
+import re
 from pathlib import Path
 
 from forge.tools.base import (
@@ -101,12 +102,35 @@ class FileEditTool(Tool):
         # Check uniqueness
         count = content.count(old_str)
         if count == 0:
-            # Try to help: show similar lines
-            hint = self._find_similar(content, old_str)
-            error = f"old_str not found in {file_path_str}."
-            if hint:
-                error += f" Did you mean:\n{hint}"
-            return ToolResult(success=False, output="", error=error)
+            # Whitespace-insensitive fallback: normalize whitespace and retry
+            match_result = self._whitespace_fallback(content, old_str)
+            if match_result is not None:
+                matched_str, ws_count = match_result
+                if ws_count == 1:
+                    logger.warning(
+                        "Exact match failed but whitespace-normalized match found in %s. "
+                        "Applying edit with warning.",
+                        file_path_str,
+                    )
+                    old_str = matched_str
+                    count = 1
+                else:
+                    return ToolResult(
+                        success=False,
+                        output="",
+                        error=(
+                            f"old_str not found exactly, but whitespace-normalized match "
+                            f"hits {ws_count} times in {file_path_str}. "
+                            "Include more context to make it unique."
+                        ),
+                    )
+            else:
+                # No match even with normalization — show similar lines
+                hint = self._find_similar(content, old_str)
+                error = f"old_str not found in {file_path_str}."
+                if hint:
+                    error += f" Did you mean:\n{hint}"
+                return ToolResult(success=False, output="", error=error)
 
         if count > 1:
             return ToolResult(
@@ -147,6 +171,51 @@ class FileEditTool(Tool):
             n=3,
         )
         return "".join(diff)
+
+    @staticmethod
+    def _normalize_ws(text: str) -> str:
+        """Normalize whitespace: collapse runs of spaces/tabs, strip trailing per line."""
+        lines = text.splitlines()
+        normalized = []
+        for line in lines:
+            # Strip trailing whitespace, collapse internal runs of spaces/tabs
+            line = line.rstrip()
+            line = re.sub(r"[ \t]+", " ", line)
+            normalized.append(line)
+        return "\n".join(normalized)
+
+    def _whitespace_fallback(self, content: str, old_str: str) -> tuple[str, int] | None:
+        """Try whitespace-insensitive matching.
+
+        Returns (matched_original_str, count) if normalized match found, else None.
+        """
+        norm_old = self._normalize_ws(old_str)
+        if not norm_old.strip():
+            return None
+
+        # Split content into candidate windows of same line count
+        old_lines = old_str.splitlines()
+        content_lines = content.splitlines()
+        window_size = len(old_lines)
+
+        if window_size == 0 or window_size > len(content_lines):
+            return None
+
+        matches: list[str] = []
+        for i in range(len(content_lines) - window_size + 1):
+            window = "\n".join(content_lines[i : i + window_size])
+            if self._normalize_ws(window) == norm_old:
+                matches.append(window)
+
+        if not matches:
+            return None
+
+        # Deduplicate — if all matches are the same string, count as 1
+        unique = set(matches)
+        if len(unique) == 1:
+            return matches[0], content.count(matches[0])
+
+        return matches[0], len(matches)
 
     @staticmethod
     def _find_similar(content: str, target: str) -> str:

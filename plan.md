@@ -34,7 +34,11 @@ Existing tools each have critical limitations that Forge addresses:
 5. **Safe by default.** Git checkpoints before every mutation. Permission gates on destructive tools. Budget limits to prevent runaway loops. Graceful degradation when the agent can't solve the problem.
 6. **Extensible via hooks.** Pre/post lifecycle events at every critical point. Third parties (or your own future self) can inject logic without modifying core code.
 
-### 1.4 Target Applications
+### 1.4 Primary Use Case
+
+Forge's first user is its author. The first scenario is **replacing SWE-agent as the evaluation and trajectory-generation engine for SWE-bench**. The immediate pain: SWE-agent + litellm hangs mid-instance, context truncation loses critical observations, and the pure-ReAct loop wastes tokens exploring blindly. Forge aims to solve all three with its hybrid loop, gradient compression, and self-managed LLM adapters. The second scenario is an **interactive CLI coding assistant** (à la Claude Code) for daily development. Both scenarios share the same core runtime; only the outer shell differs (headless harness vs. terminal REPL).
+
+### 1.5 Target Applications
 
 | Application | Priority | Description |
 |---|---|---|
@@ -277,6 +281,7 @@ class ToolRegistry:
 **FileEditTool (str_replace style)**
 - Takes: file_path, old_str, new_str
 - old_str must match exactly once in the file (prevents ambiguous edits)
+- **Whitespace-insensitive fallback:** If exact match fails, retry with normalized whitespace (collapse runs of spaces/tabs, strip trailing whitespace per line). If the normalized match is unique, apply the edit and warn. Rationale: open-source models frequently hallucinate minor whitespace differences (extra spaces, tabs vs spaces) — this fallback prevents unnecessary failures while still requiring structural match.
 - Returns: diff preview of the change
 - Validates: file exists, old_str is unique, new_str is different
 - Permission: CONFIRM_ONCE
@@ -399,11 +404,17 @@ Stage 3: Extract session memory
   └─ Write output to a topic file
   └─ Replace detailed history with reference: "See topics/session_findings.md"
   └─ Cost: 1 LLM call
+  └─ **Failure fallback:** If the LLM call fails (timeout, rate limit, malformed output),
+     skip directly to Stage 5. Log the failure event. Do NOT retry — the LLM may be
+     overloaded, and retrying a large-context summarization call worsens the situation.
 
 Stage 4: Full history summarization
   └─ Send entire conversation to LLM: "Summarize everything done so far"
   └─ Replace all history with the summary
   └─ Cost: 1 LLM call
+  └─ **Failure fallback:** Same as Stage 3 — skip to Stage 5 on any LLM failure.
+     Rationale: losing some history (Stage 5 truncation) is better than crashing
+     the entire session because a compaction call failed.
 
 Stage 5: Oldest message truncation (last resort)
   └─ Drop oldest messages one by one until under threshold
@@ -495,11 +506,16 @@ For each plan step:
 1. **Pre-step hook** fires
 2. **Git checkpoint** — auto-commit current state
 3. **Bounded ReAct loop** — max `step.budget` tool calls
-4. **Post-step evaluation:**
+4. **Post-step verification** (code-level, not LLM self-report):
+   - If tests exist for modified files → run them automatically; treat failure as step failure regardless of LLM's claim
+   - If file_edit was used → verify the target file parses without syntax errors (language-aware: `python -c "compile(open(f).read(), f, 'exec')"` for Python, etc.)
+   - If bash was used for a build/test command → check exit code, don't trust LLM's interpretation of output
+   - Rationale: LLM self-reporting ("I fixed it") is unreliable, especially with open-source models. Hard verification catches hallucinated "success."
+5. **Post-step evaluation** (after verification):
    - `completed` → checkpoint success, move to next step
    - `failed` → rollback to pre-step checkpoint, trigger replan
    - `budget_exceeded` → checkpoint partial progress (no rollback), trigger replan
-5. **Post-step hook** fires
+6. **Post-step hook** fires
 
 **Replan Mechanism:**
 
@@ -928,7 +944,7 @@ forge = "forge.main:main"
 | 9-10 | Git checkpoint: git_checkpoint.py | Auto-commit before each tool call, rollback on failure |
 | 11-12 | Integration testing + bug fixing | End-to-end demo: "fix the bug in X" works |
 
-**Milestone:** Demo video of Forge fixing a real bug in a small repo.
+**Milestone:** Forge can run end-to-end on 5 SWE-bench Lite instances, producing patches (not necessarily all correct). This proves the full pipeline works: task input → orient → plan → execute → patch output. A demo video is nice-to-have, not the gate.
 
 ### Phase 2: Intelligence (Week 3-4) — "It thinks"
 
@@ -1158,8 +1174,8 @@ Output a markdown summary, max 500 words.
 
 ### 11.3 Benchmarks (P1-P2)
 
-- SWE-bench Lite (300 instances): target 20%+ resolve rate in Phase 2
-- SWE-bench Verified (500 instances): target in Phase 3
+- SWE-bench Lite (300 instances): target **match SWE-agent baseline resolve rate with ≤50% of its token budget** in Phase 2. The goal is not raw score but token-efficiency — proving the hybrid loop wastes fewer tokens than blind ReAct.
+- SWE-bench Verified (500 instances): target in Phase 3, with emphasis on **open-source model performance** (achieve meaningful resolve rate with DeepSeek/Qwen, not just Claude/GPT-4o).
 - Custom micro-benchmarks: "fix this TypeError", "add a unit test", "refactor this function"
 
 ---

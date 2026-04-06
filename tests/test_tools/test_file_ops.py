@@ -183,6 +183,57 @@ class TestFileEditTool:
         assert "return 42" in content
         assert "return 2" in content  # bar() unchanged
 
+    @pytest.mark.asyncio
+    async def test_whitespace_fallback_succeeds(self, ctx: ToolContext, tmp_path: Path):
+        """Whitespace-insensitive fallback matches when only whitespace differs."""
+        fp = tmp_path / "ws.py"
+        fp.write_text("x  =   1\ny = 2\n", encoding="utf-8")
+        tool = FileEditTool()
+        result = await tool.execute(
+            {
+                "file_path": "ws.py",
+                "old_str": "x = 1",
+                "new_str": "x = 42",
+            },
+            ctx,
+        )
+        assert result.success is True
+        content = fp.read_text()
+        assert "42" in content
+
+    @pytest.mark.asyncio
+    async def test_whitespace_fallback_trailing_spaces(self, ctx: ToolContext, tmp_path: Path):
+        """Trailing whitespace differences are handled by fallback."""
+        fp = tmp_path / "trail.py"
+        fp.write_text("def foo():   \n    pass\n", encoding="utf-8")
+        tool = FileEditTool()
+        result = await tool.execute(
+            {
+                "file_path": "trail.py",
+                "old_str": "def foo():\n    pass",
+                "new_str": "def foo():\n    return 1",
+            },
+            ctx,
+        )
+        assert result.success is True
+        content = fp.read_text()
+        assert "return 1" in content
+
+    @pytest.mark.asyncio
+    async def test_whitespace_fallback_no_match(self, ctx: ToolContext, sample_file: Path):
+        """Whitespace fallback doesn't match structurally different content."""
+        tool = FileEditTool()
+        result = await tool.execute(
+            {
+                "file_path": "sample.py",
+                "old_str": "totally different content",
+                "new_str": "replacement",
+            },
+            ctx,
+        )
+        assert result.success is False
+        assert "not found" in result.error.lower()
+
 
 # ---------------------------------------------------------------------------
 # FileCreateTool
