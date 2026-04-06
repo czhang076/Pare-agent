@@ -133,7 +133,7 @@ class ForgeApp:
             while True:
                 # Get user input
                 try:
-                    user_input = self._get_input()
+                    user_input = await self._get_input()
                 except (EOFError, KeyboardInterrupt):
                     self.console.print()
                     self.console.print(Text("Goodbye!", style=themes.INFO))
@@ -189,22 +189,21 @@ class ForgeApp:
         finally:
             self.event_log.close()
 
-    def _get_input(self) -> str:
-        """Get user input with a styled prompt."""
+    async def _get_input(self) -> str:
+        """Get user input with a styled prompt (async-safe)."""
         try:
-            from prompt_toolkit import prompt as pt_prompt
+            from prompt_toolkit import PromptSession
             from prompt_toolkit.history import InMemoryHistory
 
-            if not hasattr(self, "_pt_history"):
-                self._pt_history = InMemoryHistory()
+            if not hasattr(self, "_pt_session"):
+                self._pt_session = PromptSession(history=InMemoryHistory())
 
-            return pt_prompt(
-                "forge> ",
-                history=self._pt_history,
-            )
+            return await self._pt_session.prompt_async("forge> ")
         except ImportError:
             # Fallback to basic input if prompt_toolkit not available
-            return input("forge> ")
+            # Run in executor to avoid blocking the event loop
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(None, lambda: input("forge> "))
 
     def _print_header(self) -> None:
         """Print the Forge banner."""

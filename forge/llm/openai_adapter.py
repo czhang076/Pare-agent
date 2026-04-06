@@ -62,6 +62,19 @@ _TOOL_CALL_FENCE_RE = re.compile(
 )
 
 
+_THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
+
+
+def _strip_think_tags(text: str) -> str:
+    """Remove <think>...</think> blocks from model output.
+
+    Some models (e.g. MiniMax-M2.7, DeepSeek-R1) wrap chain-of-thought
+    reasoning in <think> tags.  We strip these so the user only sees the
+    final answer, and tool-call parsing isn't confused by thinking content.
+    """
+    return _THINK_RE.sub("", text).strip()
+
+
 def _parse_text_tool_calls(text: str) -> list[ToolCallRequest]:
     """Extract tool calls from assistant text when native tool_use is unavailable.
 
@@ -261,7 +274,8 @@ def _parse_openai_response(
     choice = response.choices[0]
     message = choice.message
 
-    text = message.content or ""
+    raw_text = message.content or ""
+    text = _strip_think_tags(raw_text)
     tool_calls: list[ToolCallRequest] = []
 
     if profile.supports_native_tool_use and message.tool_calls:

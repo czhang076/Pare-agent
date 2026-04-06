@@ -40,6 +40,10 @@ from forge.tools.base import ToolContext, ToolRegistry, ToolResult
 from forge.agent.guardrails import Guardrails
 from forge.telemetry import EventLog
 
+import re
+
+_THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
+
 logger = logging.getLogger(__name__)
 
 
@@ -306,15 +310,45 @@ class ReActExecutor:
         """Call LLM with streaming, forwarding text deltas to the callback.
 
         Collects the full response for return while streaming text to the UI.
+        Buffers and hides <think>...</think> blocks from the UI stream.
         """
         text_parts: list[str] = []
         tool_calls: list[ToolCallRequest] = []
         usage = None
+        # State for <think> tag filtering
+        in_think = False
+        think_buffer = ""
 
-        async for chunk in await self.llm.chat_stream(messages, tool_schemas):
+        async for chunk in self.llm.chat_stream(messages, tool_schemas):
             if chunk.type == "text_delta":
                 text_parts.append(chunk.content)
-                on_text_delta(chunk.content)
+
+                # Filter <think> blocks from the UI stream
+                if in_think:
+                    think_buffer += chunk.content
+                    if "</think>" in think_buffer:
+                        # End of think block — emit any text after the tag
+                        after = think_buffer.split("</think>", 1)[1]
+                        in_think = False
+                        think_buffer = ""
+                        if after.strip():
+                            on_text_delta(after)
+                elif "<think>" in chunk.content:
+                    # Start of think block — emit text before the tag
+                    before = chunk.content.split("<think>", 1)[0]
+                    remainder = chunk.content.split("<think>", 1)[1]
+                    if before.strip():
+                        on_text_delta(before)
+                    in_think = True
+                    think_buffer = remainder
+                    if "</think>" in think_buffer:
+                        after = think_buffer.split("</think>", 1)[1]
+                        in_think = False
+                        think_buffer = ""
+                        if after.strip():
+                            on_text_delta(after)
+                else:
+                    on_text_delta(chunk.content)
             elif chunk.type == "tool_call_end" and chunk.tool_call:
                 tool_calls.append(chunk.tool_call)
             elif chunk.type == "usage" and chunk.usage:
@@ -322,8 +356,12 @@ class ReActExecutor:
 
         from forge.llm.base import TokenUsage
 
+        # Strip <think> tags from the full content for the conversation record
+        full_text = "".join(text_parts)
+        clean_text = _THINK_RE.sub("", full_text).strip()
+
         return LLMResponse(
-            content="".join(text_parts),
+            content=clean_text,
             tool_calls=tool_calls,
             stop_reason=StopReason.TOOL_USE if tool_calls else StopReason.END_TURN,
             usage=usage or TokenUsage(input_tokens=0, output_tokens=0),

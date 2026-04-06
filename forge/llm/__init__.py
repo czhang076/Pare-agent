@@ -39,8 +39,8 @@ __all__ = [
 
 _PROVIDER_PRESETS: dict[str, dict] = {
     "minimax": {
-        "base_url": "https://api.minimax.chat/v1",
-        "default_model": "MiniMax-M2.5",
+        "base_url": "https://api.minimaxi.com/v1",
+        "default_model": "MiniMax-M2.7",
     },
     "openrouter": {
         "base_url": "https://openrouter.ai/api/v1",

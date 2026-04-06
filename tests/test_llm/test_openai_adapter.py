@@ -337,8 +337,8 @@ class TestCreateLLM:
 
         llm = create_llm("minimax", api_key="test-key")
         assert isinstance(llm, OpenAIAdapter)
-        assert llm.model == "MiniMax-M2.5"
-        assert llm._base_url == "https://api.minimax.io/v1"
+        assert llm.model == "MiniMax-M2.7"
+        assert llm._base_url == "https://api.minimaxi.com/v1"
 
     def test_create_openai(self):
         from forge.llm import create_llm
