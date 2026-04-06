@@ -1,0 +1,2 @@
+{"type": "agent_event", "data": {"phase": "start", "task": "你好"}, "timestamp": 1775483479.1717796}
+{"type": "git_checkpoint", "data": {"action": "setup", "branch": "forge/working-e6c010a"}, "timestamp": 1775483481.8705397}
