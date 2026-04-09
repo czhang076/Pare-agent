@@ -3,7 +3,9 @@
     "allow": [
       "Bash(python -m pytest tests/ -v)",
       "Bash(python -m pytest tests/test_agent/ -v)",
-      "Bash(python -m pytest tests/ --tb=short -q)"
+      "Bash(python -m pytest tests/ --tb=short -q)",
+      "Bash(python -m pytest tests/test_llm/test_base.py -x --tb=short)",
+      "WebSearch"
     ]
   }
 }

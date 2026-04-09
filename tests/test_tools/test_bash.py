@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from forge.tools.base import ToolContext
-from forge.tools.bash import BashTool
+from pare.tools.base import ToolContext
+from pare.tools.bash import BashTool
 
 
 @pytest.fixture
@@ -75,5 +75,5 @@ class TestBashTool:
     @pytest.mark.asyncio
     async def test_permission_level(self):
         tool = BashTool()
-        from forge.tools.base import PermissionLevel
+        from pare.tools.base import PermissionLevel
         assert tool.permission_level == PermissionLevel.ALWAYS_CONFIRM

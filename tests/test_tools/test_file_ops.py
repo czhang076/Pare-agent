@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from forge.tools.base import ToolContext
-from forge.tools.file_edit import FileCreateTool, FileEditTool
-from forge.tools.file_read import FileReadTool
+from pare.tools.base import ToolContext
+from pare.tools.file_edit import FileCreateTool, FileEditTool
+from pare.tools.file_read import FileReadTool
 
 
 @pytest.fixture

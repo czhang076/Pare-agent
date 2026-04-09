@@ -2,7 +2,7 @@
 
 import pytest
 
-from forge.tools.base import (
+from pare.tools.base import (
     MutationType,
     PermissionLevel,
     Tool,
@@ -100,7 +100,7 @@ class TestPermissions:
         assert tool.needs_confirmation(ctx) is False
 
     def test_always_confirm(self, ctx: ToolContext):
-        from forge.tools.bash import BashTool
+        from pare.tools.bash import BashTool
         tool = BashTool()
         ctx.headless = False
         tool.mark_confirmed(ctx)
@@ -108,7 +108,7 @@ class TestPermissions:
         assert tool.needs_confirmation(ctx) is True
 
     def test_headless_skips_all_confirmation(self, ctx: ToolContext):
-        from forge.tools.bash import BashTool
+        from pare.tools.bash import BashTool
         tool = BashTool()
         ctx.headless = True
         assert tool.needs_confirmation(ctx) is False

@@ -1,4 +1,4 @@
-"""Tests for forge/cli/renderer.py."""
+"""Tests for pare/cli/renderer.py."""
 
 from io import StringIO
 
@@ -6,9 +6,9 @@ import pytest
 
 from rich.console import Console
 
-from forge.agent.executor import ToolCallEvent
-from forge.cli.renderer import StreamRenderer
-from forge.tools.base import ToolResult
+from pare.agent.executor import ToolCallEvent
+from pare.cli.renderer import StreamRenderer
+from pare.tools.base import ToolResult
 
 
 @pytest.fixture

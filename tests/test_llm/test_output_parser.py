@@ -1,4 +1,4 @@
-"""Tests for forge/llm/output_parser.py.
+"""Tests for pare/llm/output_parser.py.
 
 The output parser is the most critical piece for open-source model support.
 These tests cover real-world LLM output patterns observed from DeepSeek,
@@ -7,7 +7,7 @@ Qwen, and various models accessed through OpenRouter.
 
 import pytest
 
-from forge.llm.output_parser import ParseError, parse_json_response, try_parse_json_response
+from pare.llm.output_parser import ParseError, parse_json_response, try_parse_json_response
 
 
 class TestDirectParse:

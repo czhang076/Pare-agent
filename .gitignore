@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+
+# Distribution / packaging
+build/
+dist/
+eggs/
+.wheels/
+
+# Virtual Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Testing and coverage
+.tox/
+.coverage
+.coverage.*
+nosetests.xml
+coverage.xml
+*.pycover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS generated files
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+
+# Project specific
+MEMORY.md
+topics/
+.pare/

@@ -1,10 +1,10 @@
-"""Tests for forge/llm/retry.py."""
+"""Tests for pare/llm/retry.py."""
 
 import asyncio
 
 import pytest
 
-from forge.llm.retry import RetryPolicy, is_retryable, with_retry
+from pare.llm.retry import RetryPolicy, is_retryable, with_retry
 
 
 # ---------------------------------------------------------------------------

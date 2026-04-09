@@ -1,6 +1,6 @@
-"""Tests for forge/llm/base.py — core data types."""
+"""Tests for pare/llm/base.py — core data types."""
 
-from forge.llm.base import (
+from pare.llm.base import (
     ContentBlock,
     ContentBlockType,
     Message,

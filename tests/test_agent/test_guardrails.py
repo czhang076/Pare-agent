@@ -1,8 +1,8 @@
-"""Tests for forge/agent/guardrails.py."""
+"""Tests for pare/agent/guardrails.py."""
 
 import pytest
 
-from forge.agent.guardrails import GuardrailConfig, Guardrails
+from pare.agent.guardrails import GuardrailConfig, Guardrails
 
 
 class TestBudgetGuard:
@@ -158,7 +158,25 @@ class TestResetStep:
         guard.reset_step()
 
         assert guard.state.step_tool_calls == 0
-        assert len(guard.state.read_files) == 0
+        assert len(guard.state.read_files) == 1  # Preserved across steps
         assert len(guard.state.edited_files) == 0
         assert len(guard.state.action_hashes) == 0
         assert guard.state.total_tool_calls == 50  # Preserved
+
+    def test_reset_all_clears_everything(self):
+        guard = Guardrails()
+        guard.state.step_tool_calls = 10
+        guard.state.total_tool_calls = 50
+        guard.state.read_files.add("a.py")
+        guard.state.edited_files.add("b.py")
+        guard.state.action_hashes["abc"] = 5
+        guard.state.consecutive_errors = 3
+
+        guard.state.reset_all()
+
+        assert guard.state.step_tool_calls == 0
+        assert guard.state.total_tool_calls == 0
+        assert guard.state.consecutive_errors == 0
+        assert len(guard.state.read_files) == 0
+        assert len(guard.state.edited_files) == 0
+        assert len(guard.state.action_hashes) == 0
