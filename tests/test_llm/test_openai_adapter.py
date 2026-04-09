@@ -1,4 +1,4 @@
-"""Tests for forge/llm/openai_adapter.py.
+"""Tests for pare/llm/openai_adapter.py.
 
 These tests cover the unit-testable parts of the adapter without making
 real API calls: message translation, text-based tool call parsing,
@@ -7,7 +7,7 @@ temperature clamping, and the factory function.
 
 import json
 
-from forge.llm.base import (
+from pare.llm.base import (
     ContentBlock,
     ContentBlockType,
     Message,
@@ -16,7 +16,7 @@ from forge.llm.base import (
     ToolSchema,
     get_profile,
 )
-from forge.llm.openai_adapter import (
+from pare.llm.openai_adapter import (
     OpenAIAdapter,
     _build_openai_messages,
     _build_openai_tools,
@@ -24,7 +24,7 @@ from forge.llm.openai_adapter import (
     _parse_text_tool_calls,
     _stop_reason_from_openai,
 )
-from forge.llm.base import StopReason
+from pare.llm.base import StopReason
 
 
 # ---------------------------------------------------------------------------
@@ -325,15 +325,15 @@ class TestTemperatureClamping:
 
 class TestCreateLLM:
     def test_create_anthropic(self):
-        from forge.llm import create_llm
-        from forge.llm.anthropic_adapter import AnthropicAdapter
+        from pare.llm import create_llm
+        from pare.llm.anthropic_adapter import AnthropicAdapter
 
         llm = create_llm("anthropic", api_key="test-key")
         assert isinstance(llm, AnthropicAdapter)
         assert llm.model == "claude-sonnet-4-20250514"
 
     def test_create_minimax(self):
-        from forge.llm import create_llm
+        from pare.llm import create_llm
 
         llm = create_llm("minimax", api_key="test-key")
         assert isinstance(llm, OpenAIAdapter)
@@ -341,21 +341,21 @@ class TestCreateLLM:
         assert llm._base_url == "https://api.minimaxi.com/v1"
 
     def test_create_openai(self):
-        from forge.llm import create_llm
+        from pare.llm import create_llm
 
         llm = create_llm("openai", model="gpt-4o", api_key="test-key")
         assert isinstance(llm, OpenAIAdapter)
         assert llm.model == "gpt-4o"
 
     def test_create_openrouter(self):
-        from forge.llm import create_llm
+        from pare.llm import create_llm
 
         llm = create_llm("openrouter", api_key="test-key")
         assert isinstance(llm, OpenAIAdapter)
         assert llm._base_url == "https://openrouter.ai/api/v1"
 
     def test_create_custom_endpoint(self):
-        from forge.llm import create_llm
+        from pare.llm import create_llm
 
         llm = create_llm(
             "openai",

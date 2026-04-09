@@ -1,4 +1,4 @@
-"""Tests for forge/sandbox/git_checkpoint.py.
+"""Tests for pare/sandbox/git_checkpoint.py.
 
 Each test gets a fresh git repo in a temp directory so tests are fully
 isolated.  We use real git operations — no mocking — because the whole
@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from forge.sandbox.git_checkpoint import GitCheckpoint, GitCheckpointError
+from pare.sandbox.git_checkpoint import GitCheckpoint, GitCheckpointError
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +73,7 @@ class TestSetup:
         assert original == "master" or original == "main"
         assert cp.is_active
         assert cp.working_branch is not None
-        assert cp.working_branch.startswith("forge/working-")
+        assert cp.working_branch.startswith("pare/working-")
 
         # Verify we're on the working branch
         branch = (await _git(repo, "rev-parse", "--abbrev-ref", "HEAD")).strip()
@@ -243,11 +243,11 @@ class TestFinalize:
 
         # Working branch should be deleted
         branches = await _git(repo, "branch")
-        assert "forge/working" not in branches
+        assert "pare/working" not in branches
 
         # Should be a single squash commit (not 2 separate)
         log = await _git(repo, "log", "--oneline", "-5")
-        assert "forge: apply agent changes" in log
+        assert "pare: apply agent changes" in log
 
     @pytest.mark.asyncio
     async def test_finalize_no_changes(self, cp: GitCheckpoint, repo: Path):

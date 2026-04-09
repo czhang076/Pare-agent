@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from forge.tools.base import ToolContext
-from forge.tools.search import SearchTool
+from pare.tools.base import ToolContext
+from pare.tools.search import SearchTool
 
 
 @pytest.fixture

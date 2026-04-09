@@ -1,6 +1,6 @@
-"""Tests for forge/main.py — argument parsing."""
+"""Tests for pare/main.py — argument parsing."""
 
-from forge.main import build_parser
+from pare.main import build_parser
 
 
 class TestArgParser:

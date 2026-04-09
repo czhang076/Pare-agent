@@ -1,4 +1,4 @@
-"""Tests for forge/cli/commands.py."""
+"""Tests for pare/cli/commands.py."""
 
 from pathlib import Path
 from io import StringIO
@@ -7,8 +7,8 @@ import pytest
 
 from rich.console import Console
 
-from forge.cli.commands import CommandHandler
-from forge.telemetry import EventLog
+from pare.cli.commands import CommandHandler
+from pare.telemetry import EventLog
 
 
 @pytest.fixture

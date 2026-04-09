@@ -1,4 +1,4 @@
-"""Tests for forge/agent/executor.py.
+"""Tests for pare/agent/executor.py.
 
 Uses a mock LLM adapter that returns predetermined responses, allowing
 us to test the ReAct loop logic without real API calls.
@@ -11,9 +11,9 @@ from typing import AsyncIterator
 
 import pytest
 
-from forge.agent.executor import ReActExecutor, ExecutionResult
-from forge.agent.guardrails import GuardrailConfig, Guardrails
-from forge.llm.base import (
+from pare.agent.executor import ReActExecutor, ExecutionResult
+from pare.agent.guardrails import GuardrailConfig, Guardrails
+from pare.llm.base import (
     LLMAdapter,
     LLMResponse,
     Message,
@@ -24,7 +24,7 @@ from forge.llm.base import (
     ToolCallRequest,
     ToolSchema,
 )
-from forge.tools.base import (
+from pare.tools.base import (
     MutationType,
     PermissionLevel,
     Tool,
@@ -226,8 +226,8 @@ class TestReActExecutor:
     @pytest.mark.asyncio
     async def test_read_before_write_enforced(self, ctx):
         """Guardrail blocks file_edit without prior file_read."""
-        from forge.tools.file_edit import FileEditTool
-        from forge.tools.file_read import FileReadTool
+        from pare.tools.file_edit import FileEditTool
+        from pare.tools.file_read import FileReadTool
 
         # Create a file to edit
         (ctx.cwd / "main.py").write_text("x = 1\n")

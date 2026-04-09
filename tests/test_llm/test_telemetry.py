@@ -1,11 +1,11 @@
-"""Tests for forge/telemetry.py."""
+"""Tests for pare/telemetry.py."""
 
 import json
 from pathlib import Path
 
 import pytest
 
-from forge.telemetry import EventLog
+from pare.telemetry import EventLog
 
 
 @pytest.fixture
