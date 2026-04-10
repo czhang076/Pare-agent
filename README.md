@@ -1,1 +1,1 @@
-# minee-agent
+# Pare-agent
