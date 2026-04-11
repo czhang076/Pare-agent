@@ -1,4 +1,4 @@
-"""Planner — LLM-based structured plan generation and replanning.
+"""Planner — LLM-based structured plan generation.
 
 The Plan phase takes the repository context and user task, and asks the
 LLM to produce a structured JSON plan with coarse-grained steps.  Each
@@ -7,17 +7,16 @@ step has a goal, target files, expected tools, budget, and success criteria.
 Plan granularity is deliberately coarse — "modify the auth module" not
 "change line 47".  Fine-grained decisions happen in the Execute phase.
 
-The Planner also handles replanning when a step fails or exceeds its budget.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 
-from pare.llm.base import LLMAdapter, Message
-from pare.llm.output_parser import parse_json_response, try_parse_json_response
+from pare.llm.base import LLMAdapter, Message, TokenUsage
+from pare.llm.output_parser import parse_json_response
 
 logger = logging.getLogger(__name__)
 
@@ -159,48 +158,27 @@ not a fine-grained action ("change line 47").
 {plan_schema}
 """
 
-_REPLAN_SYSTEM_PROMPT = """\
-You are Pare, an expert coding agent. A step in your plan has failed \
-or exceeded its budget.
-
-## What happened
-Step {step_number}: {step_goal}
-Status: {status}
-Reason: {reason}
-Tool calls used: {tool_calls_used}
-
-## Changes made so far
-{diff_summary}
-
-## Remaining original plan
-{remaining_steps}
-
-## Rules
-- Create a revised plan for the remaining work.
-- Learn from what failed — do NOT repeat the same approach.
-- Output ONLY a JSON object with the same schema as before.
-- Renumber steps starting from {next_step_number}.
-"""
-
-
 # ---------------------------------------------------------------------------
 # Planner
 # ---------------------------------------------------------------------------
 
 
 class Planner:
-    """Generates and revises structured plans via LLM.
+    """Generates structured plans via LLM.
 
     Usage:
         planner = Planner(llm)
         plan = await planner.create_plan(task, memory_index)
-
-        # On failure:
-        new_plan = await planner.replan(failed_step, result, remaining, diff)
     """
 
     def __init__(self, llm: LLMAdapter) -> None:
         self.llm = llm
+        self._total_usage = TokenUsage(input_tokens=0, output_tokens=0)
+
+    @property
+    def total_usage(self) -> TokenUsage:
+        """Accumulated token usage across all planner LLM calls."""
+        return self._total_usage
 
     async def create_plan(
         self,
@@ -226,6 +204,7 @@ class Planner:
                 Message(role="system", content=system),
                 Message(role="user", content=f"Task: {task}"),
             ])
+            self._total_usage = self._total_usage + response.usage
 
             plan = self._parse_plan(response.content)
             logger.info(
@@ -237,49 +216,6 @@ class Planner:
         except Exception as e:
             logger.warning("Plan generation failed: %s — using fallback", e)
             return self._fallback_plan(task)
-
-    async def replan(
-        self,
-        failed_step: PlanStep,
-        remaining_steps: list[PlanStep],
-        diff_summary: str = "",
-        tool_calls_used: int = 0,
-    ) -> Plan:
-        """Ask the LLM to revise the plan after a step failure.
-
-        Returns a new Plan with revised steps.
-        """
-        remaining_text = "\n".join(
-            f"  Step {s.step_number}: {s.goal}" for s in remaining_steps
-        ) or "(no remaining steps)"
-
-        system = _REPLAN_SYSTEM_PROMPT.format(
-            step_number=failed_step.step_number,
-            step_goal=failed_step.goal,
-            status=failed_step.status,
-            reason=failed_step.failure_reason or "budget exceeded",
-            tool_calls_used=tool_calls_used,
-            diff_summary=diff_summary or "(no changes yet)",
-            remaining_steps=remaining_text,
-            next_step_number=failed_step.step_number,
-        )
-
-        try:
-            response = await self.llm.chat([
-                Message(role="system", content=system),
-                Message(role="user", content="Create a revised plan."),
-            ])
-
-            plan = self._parse_plan(response.content)
-            logger.info("Replan created: %d steps", len(plan.steps))
-            return plan
-
-        except Exception as e:
-            logger.warning("Replan failed: %s — continuing with remaining steps", e)
-            return Plan(
-                summary="Continuing with original plan",
-                steps=remaining_steps,
-            )
 
     # ------------------------------------------------------------------
     # Parsing

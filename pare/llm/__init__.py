@@ -62,40 +62,17 @@ def create_llm(
 ) -> LLMAdapter:
     """Factory function to create an LLM adapter by provider name.
 
-    Providers:
-        "anthropic" → AnthropicAdapter (direct SDK)
-        "openai"    → OpenAIAdapter (direct SDK)
-        "minimax"   → OpenAIAdapter with base_url="https://api.minimax.io/v1"
-        "openrouter" → OpenAIAdapter with base_url="https://openrouter.ai/api/v1"
-
-    For custom endpoints (local vLLM, etc.), use provider="openai" with
-    a custom base_url.
+    All providers use the OpenAI-compatible adapter. MiniMax and OpenRouter
+    have preset base_url values. For custom endpoints (local vLLM, etc.),
+    use provider="openai" with a custom base_url.
 
     Usage:
-        # MiniMax
         llm = create_llm("minimax", model="MiniMax-M2.5", api_key="...")
-
-        # Anthropic
-        llm = create_llm("anthropic", model="claude-sonnet-4-20250514")
-
-        # Local vLLM
+        llm = create_llm("openrouter", model="deepseek/deepseek-chat", api_key="...")
         llm = create_llm("openai", model="my-model", base_url="http://localhost:8000/v1")
     """
     provider = provider.lower()
 
-    if provider == "anthropic":
-        from pare.llm.anthropic_adapter import AnthropicAdapter
-
-        return AnthropicAdapter(
-            model=model or "claude-sonnet-4-20250514",
-            profile=profile,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            api_key=api_key,
-            retry_policy=retry_policy,
-        )
-
-    # All OpenAI-compatible providers
     from pare.llm.openai_adapter import OpenAIAdapter
 
     preset = _PROVIDER_PRESETS.get(provider, {})

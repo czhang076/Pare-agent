@@ -1,5 +1,6 @@
 """Tests for BashTool."""
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -37,8 +38,9 @@ class TestBashTool:
     @pytest.mark.asyncio
     async def test_timeout(self, ctx: ToolContext):
         tool = BashTool()
+        cmd = f'"{sys.executable}" -c "import time; time.sleep(60)"'
         result = await tool.execute(
-            {"command": "sleep 60", "timeout": 1},
+            {"command": cmd, "timeout": 1},
             ctx,
         )
         assert result.success is False
@@ -55,7 +57,8 @@ class TestBashTool:
     @pytest.mark.asyncio
     async def test_cwd_respected(self, ctx: ToolContext):
         tool = BashTool()
-        result = await tool.execute({"command": "pwd"}, ctx)
+        cmd = f'"{sys.executable}" -c "import os; print(os.getcwd())"'
+        result = await tool.execute({"command": cmd}, ctx)
         assert result.success is True
         # The output should contain the tmp_path
         # (normalize for Windows: compare basenames)

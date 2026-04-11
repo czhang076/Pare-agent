@@ -1,9 +1,9 @@
-"""Pare entry point — CLI argument parsing and app bootstrap.
+"""Pare entry point — headless batch execution.
 
 Usage:
-    pare                              # Interactive mode
-    pare "fix the bug in main.py"     # One-shot mode
-    pare --provider minimax --model MiniMax-M2.5 "task"
+    pare "fix the bug in main.py"
+    pare "task" --output result.json
+    pare "task" --provider openrouter --model deepseek/deepseek-chat -o out.json
 """
 
 from __future__ import annotations
@@ -16,19 +16,17 @@ import sys
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pare",
-        description="Pare — the coding agent that never breaks your repo",
+        description="Pare — headless coding agent for trajectory generation",
     )
     parser.add_argument(
         "task",
-        nargs="?",
-        default=None,
-        help="Task to execute (one-shot mode). Omit for interactive mode.",
+        help="Task to execute.",
     )
     parser.add_argument(
         "--provider", "-p",
-        default="anthropic",
-        choices=["anthropic", "openai", "minimax", "openrouter"],
-        help="LLM provider (default: anthropic)",
+        default="openai",
+        choices=["openai", "minimax", "openrouter"],
+        help="LLM provider (default: openai)",
     )
     parser.add_argument(
         "--model", "-m",
@@ -51,6 +49,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Working directory (default: current directory)",
     )
     parser.add_argument(
+        "--output", "-o",
+        default=None,
+        help="Write structured JSON result to this path.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for reproducibility.",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Enable verbose logging",
@@ -71,21 +80,19 @@ def main() -> None:
         logging.basicConfig(level=logging.WARNING)
 
     from pathlib import Path
-    from pare.cli.app import PareApp
+    from pare.cli.headless import run_headless
 
-    app = PareApp(
+    exit_code = asyncio.run(run_headless(
+        task=args.task,
         provider=args.provider,
         model=args.model,
         api_key=args.api_key,
         base_url=args.base_url,
         cwd=Path(args.cwd) if args.cwd else None,
-    )
-
-    if args.task:
-        exit_code = asyncio.run(app.run_once(args.task))
-        sys.exit(exit_code)
-    else:
-        asyncio.run(app.run_interactive())
+        output_path=Path(args.output) if args.output else None,
+        verbose=args.verbose,
+    ))
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

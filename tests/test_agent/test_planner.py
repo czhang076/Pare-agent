@@ -1,4 +1,4 @@
-"""Tests for the Planner — LLM-based plan generation and replanning.
+"""Tests for the Planner — LLM-based plan generation.
 
 Uses mock LLM responses to test parsing logic without real API calls.
 """
@@ -10,7 +10,7 @@ import json
 import pytest
 
 from pare.agent.planner import Plan, PlanStep, Planner
-from pare.llm.base import LLMAdapter, LLMResponse, Message, StopReason, TokenUsage, ToolSchema
+from pare.llm.base import LLMAdapter, LLMResponse, Message, StopReason, TokenUsage
 
 
 # ---------------------------------------------------------------------------
@@ -197,39 +197,3 @@ class TestCreatePlan:
         system_content = calls[0][0].content
         assert "src/ (3 files)" in system_content
 
-
-# ---------------------------------------------------------------------------
-# Replan tests
-# ---------------------------------------------------------------------------
-
-
-class TestReplan:
-    @pytest.mark.asyncio
-    async def test_replan_creates_revised_plan(self):
-        response = json.dumps({
-            "summary": "Revised approach",
-            "steps": [
-                {"step_number": 2, "goal": "Try different approach"},
-                {"step_number": 3, "goal": "Run tests"},
-            ],
-        })
-        planner = Planner(MockPlannerLLM(response))
-
-        failed = PlanStep(step_number=2, goal="Edit auth", status="failed", failure_reason="File not found")
-        remaining = [PlanStep(step_number=3, goal="Run tests")]
-
-        plan = await planner.replan(failed, remaining, diff_summary="no changes")
-        assert len(plan.steps) == 2
-        assert "different approach" in plan.steps[0].goal
-
-    @pytest.mark.asyncio
-    async def test_replan_fallback_on_failure(self):
-        planner = Planner(MockPlannerLLM("not valid json at all"))
-
-        failed = PlanStep(step_number=1, goal="Step 1", status="failed")
-        remaining = [PlanStep(step_number=2, goal="Step 2")]
-
-        plan = await planner.replan(failed, remaining)
-        # Should fall back to remaining steps
-        assert len(plan.steps) == 1
-        assert plan.steps[0].goal == "Step 2"

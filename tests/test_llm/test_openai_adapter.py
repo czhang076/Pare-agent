@@ -324,14 +324,6 @@ class TestTemperatureClamping:
 
 
 class TestCreateLLM:
-    def test_create_anthropic(self):
-        from pare.llm import create_llm
-        from pare.llm.anthropic_adapter import AnthropicAdapter
-
-        llm = create_llm("anthropic", api_key="test-key")
-        assert isinstance(llm, AnthropicAdapter)
-        assert llm.model == "claude-sonnet-4-20250514"
-
     def test_create_minimax(self):
         from pare.llm import create_llm
 

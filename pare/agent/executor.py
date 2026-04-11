@@ -34,10 +34,12 @@ from pare.llm.base import (
     Message,
     StopReason,
     StreamChunk,
+    TokenUsage,
     ToolCallRequest,
 )
 from pare.tools.base import ToolContext, ToolRegistry, ToolResult
 from pare.agent.guardrails import Guardrails
+from pare.agent.verify import syntax_check, git_diff_check
 from pare.telemetry import EventLog
 
 import re
@@ -69,6 +71,7 @@ class ExecutionResult:
     messages: list[Message]
     tool_call_count: int = 0
     stop_reason: str = "end_turn"  # end_turn | budget_exhausted | error | max_tokens
+    total_usage: TokenUsage = field(default_factory=lambda: TokenUsage(input_tokens=0, output_tokens=0))
 
 
 @dataclass(slots=True)
@@ -154,6 +157,8 @@ class ReActExecutor:
         total_calls = 0
         iterations = 0
         final_text = ""
+        total_usage = TokenUsage(input_tokens=0, output_tokens=0)
+        diff_warned = False  # Tier 1: only warn about empty diff once
 
         while True:
             # Check per-step iteration limit (from planner budget)
@@ -164,6 +169,7 @@ class ReActExecutor:
                     messages=conversation,
                     tool_call_count=total_calls,
                     stop_reason="budget_exhausted",
+                    total_usage=total_usage,
                 )
 
             # Check total budget before calling LLM
@@ -174,6 +180,7 @@ class ReActExecutor:
                     messages=conversation,
                     tool_call_count=total_calls,
                     stop_reason="budget_exhausted",
+                    total_usage=total_usage,
                 )
 
             # Call LLM
@@ -197,9 +204,11 @@ class ReActExecutor:
                     messages=conversation,
                     tool_call_count=total_calls,
                     stop_reason="error",
+                    total_usage=total_usage,
                 )
 
             iterations += 1
+            total_usage = total_usage + response.usage
             duration = time.time() - start_time
             self._log(
                 "llm_response",
@@ -222,6 +231,25 @@ class ReActExecutor:
 
             # If no tool calls, we're done
             if not response.tool_calls:
+                # Tier 1 diff check: if agent made writes but git shows no diff
+                if (
+                    total_calls > 0
+                    and not diff_warned
+                    and not git_diff_check(context.cwd)
+                ):
+                    diff_warned = True
+                    self._log("verify", check="diff_empty")
+                    conversation.append(Message(
+                        role="user",
+                        content=(
+                            "⚠ Verification: you called write tools but `git diff` "
+                            "shows no changes. Did you actually modify the files? "
+                            "If you believe the task is already done, confirm. "
+                            "Otherwise, make the needed changes."
+                        ),
+                    ))
+                    continue  # Give the LLM one more turn
+
                 stop = "max_tokens" if response.stop_reason == StopReason.MAX_TOKENS else "end_turn"
                 return ExecutionResult(
                     success=True,
@@ -229,6 +257,7 @@ class ReActExecutor:
                     messages=conversation,
                     tool_call_count=total_calls,
                     stop_reason=stop,
+                    total_usage=total_usage,
                 )
 
             # Execute tool calls
@@ -293,6 +322,20 @@ class ReActExecutor:
                     error=result.error or None,
                     duration=round(event.duration, 2),
                 )
+
+                # Post-edit syntax check (Tier 1 verification)
+                if result.success and tc.name in ("file_edit", "file_create"):
+                    edited_path = tc.arguments.get("file_path", "")
+                    if edited_path:
+                        full_path = (context.cwd / edited_path).resolve()
+                        syntax_err = syntax_check(full_path)
+                        if syntax_err:
+                            result = ToolResult(
+                                success=True,
+                                output=f"{result.output}\n\n⚠ SYNTAX ERROR: {syntax_err}\nPlease fix this before continuing.",
+                                metadata=result.metadata,
+                            )
+                            self._log("verify", check="syntax", file=edited_path, error=syntax_err)
 
                 # Build result text
                 if result.success:

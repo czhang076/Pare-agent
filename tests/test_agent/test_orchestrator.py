@@ -212,68 +212,21 @@ class TestHybridMode:
         assert result.tool_call_count == 2
 
     @pytest.mark.asyncio
-    async def test_hybrid_replan_on_budget_exceeded(self, tmp_path: Path):
-        """When a step exceeds its budget, the planner replans."""
+    async def test_hybrid_stops_on_budget_exceeded_no_replan(self, tmp_path: Path):
+        """When a step exceeds budget, execution stops with plan_failed."""
         llm = MockAgentLLM([
-            # Initial plan: step 1 has budget=1 (will be exhausted)
+            # Step 1 has budget=1 and will be exhausted after one tool call.
             _plan_response("Tight budget", [
                 {"step_number": 1, "goal": "Do task", "budget": 1},
                 {"step_number": 2, "goal": "Verify", "budget": 5},
             ]),
-            # Step 1: calls tool once (budget=1 means 1 iteration)
+            # Step 1 execution
             _tool_call_response("echo", {"text": "attempt"}),
-            # Step 1 hits iteration limit, so executor returns budget_exhausted
-            # → replan is triggered
-
-            # Replan response: revised plan
-            _plan_response("Revised approach", [
-                {"step_number": 1, "goal": "Try differently", "budget": 5},
-                {"step_number": 2, "goal": "Verify again", "budget": 5},
-            ]),
-            # Revised step 1 executor
-            _text_response("Revised step done."),
-            # Revised step 2 executor
-            _text_response("Verified."),
         ])
-        config = AgentConfig(git_checkpoint=False, use_planning=True, max_replans=3)
+        config = AgentConfig(git_checkpoint=False, use_planning=True)
         agent = Agent(llm=llm, cwd=tmp_path, registry=_make_registry(), config=config)
 
         result = await agent.run("Do something")
-
-        assert result.success is True
-        assert result.stop_reason == "plan_complete"
-
-    @pytest.mark.asyncio
-    async def test_hybrid_replan_exhausted(self, tmp_path: Path):
-        """When max replans exceeded, the hybrid loop stops with failure."""
-        llm = MockAgentLLM([
-            # Initial plan with budget=1 step
-            _plan_response("Will fail", [
-                {"step_number": 1, "goal": "Doomed step", "budget": 1},
-            ]),
-            # Step 1: executor does 1 iteration then budget exceeded
-            _tool_call_response("echo", {"text": "try"}),
-            # Replan 1: also budget=1
-            _plan_response("Retry 1", [
-                {"step_number": 1, "goal": "Still doomed", "budget": 1},
-            ]),
-            _tool_call_response("echo", {"text": "try2"}),
-            # Replan 2: also budget=1
-            _plan_response("Retry 2", [
-                {"step_number": 1, "goal": "Still doomed 2", "budget": 1},
-            ]),
-            _tool_call_response("echo", {"text": "try3"}),
-            # Replan 3: also budget=1
-            _plan_response("Retry 3", [
-                {"step_number": 1, "goal": "Still doomed 3", "budget": 1},
-            ]),
-            _tool_call_response("echo", {"text": "try4"}),
-            # max_replans=3 exhausted → loop breaks
-        ])
-        config = AgentConfig(git_checkpoint=False, use_planning=True, max_replans=3)
-        agent = Agent(llm=llm, cwd=tmp_path, registry=_make_registry(), config=config)
-
-        result = await agent.run("Impossible task")
 
         assert result.success is False
         assert result.stop_reason == "plan_failed"
@@ -341,3 +294,107 @@ class TestMaxIterations:
 
         assert result.success is True
         assert result.tool_call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Tests: Token tracking
+# ---------------------------------------------------------------------------
+
+
+class TestTokenTracking:
+    """Verify that token usage is accumulated correctly across LLM calls."""
+
+    @pytest.mark.asyncio
+    async def test_flat_mode_tracks_tokens(self, tmp_path: Path):
+        """Flat mode: total_usage reflects all LLM calls in the executor."""
+        llm = MockAgentLLM([
+            _tool_call_response("echo", {"text": "hello"}),
+            _text_response("Done."),
+        ])
+        config = AgentConfig(git_checkpoint=False, use_planning=False)
+        agent = Agent(llm=llm, cwd=tmp_path, registry=_make_registry(), config=config)
+
+        result = await agent.run("Echo hello")
+
+        # 2 LLM calls × _USAGE(100 input, 50 output) = 200 input, 100 output
+        assert result.total_usage.input_tokens == 200
+        assert result.total_usage.output_tokens == 100
+        assert result.total_usage.total_tokens == 300
+
+    @pytest.mark.asyncio
+    async def test_flat_mode_single_call_tokens(self, tmp_path: Path):
+        """Flat mode with no tool calls: single LLM call usage."""
+        llm = MockAgentLLM([_text_response("Nothing to do.")])
+        config = AgentConfig(git_checkpoint=False, use_planning=False)
+        agent = Agent(llm=llm, cwd=tmp_path, registry=_make_registry(), config=config)
+
+        result = await agent.run("Do nothing")
+
+        assert result.total_usage.input_tokens == 100
+        assert result.total_usage.output_tokens == 50
+
+    @pytest.mark.asyncio
+    async def test_hybrid_mode_includes_planner_tokens(self, tmp_path: Path):
+        """Hybrid mode: total_usage includes planner + executor LLM calls."""
+        llm = MockAgentLLM([
+            # 1. Planner create_plan (1 LLM call)
+            _plan_response("Simple task", [
+                {"step_number": 1, "goal": "Do it", "budget": 5},
+            ]),
+            # 2. Executor step 1: tool call + finish (2 LLM calls)
+            _tool_call_response("echo", {"text": "hello"}),
+            _text_response("Done."),
+        ])
+        config = AgentConfig(git_checkpoint=False, use_planning=True)
+        agent = Agent(llm=llm, cwd=tmp_path, registry=_make_registry(), config=config)
+
+        result = await agent.run("Simple task")
+
+        # 3 LLM calls total: 1 planner + 2 executor
+        # Each = _USAGE(100 input, 50 output)
+        assert result.total_usage.input_tokens == 300
+        assert result.total_usage.output_tokens == 150
+
+    @pytest.mark.asyncio
+    async def test_hybrid_mode_multi_step_tokens(self, tmp_path: Path):
+        """Hybrid mode with 2 steps: tokens accumulate across all steps + planner."""
+        llm = MockAgentLLM([
+            # Planner (1 call)
+            _plan_response("Two steps", [
+                {"step_number": 1, "goal": "First", "budget": 5},
+                {"step_number": 2, "goal": "Second", "budget": 5},
+            ]),
+            # Step 1 executor (2 calls)
+            _tool_call_response("echo", {"text": "1"}),
+            _text_response("Step 1 done."),
+            # Step 2 executor (1 call)
+            _text_response("Step 2 done."),
+        ])
+        config = AgentConfig(git_checkpoint=False, use_planning=True)
+        agent = Agent(llm=llm, cwd=tmp_path, registry=_make_registry(), config=config)
+
+        result = await agent.run("Two step task")
+
+        # 4 LLM calls: 1 planner + 2 step1 + 1 step2
+        assert result.total_usage.input_tokens == 400
+        assert result.total_usage.output_tokens == 200
+
+    @pytest.mark.asyncio
+    async def test_executor_tracks_tokens_directly(self, tmp_path: Path):
+        """ReActExecutor.run() returns accumulated total_usage."""
+        from pare.agent.executor import ReActExecutor
+
+        llm = MockAgentLLM([
+            _tool_call_response("echo", {"text": "1"}),
+            _tool_call_response("echo", {"text": "2"}),
+            _text_response("Done."),
+        ])
+        registry = _make_registry()
+        executor = ReActExecutor(llm, registry)
+        ctx = ToolContext(cwd=tmp_path, headless=True)
+
+        result = await executor.run("system", "task", ctx)
+
+        # 3 LLM calls
+        assert result.total_usage.input_tokens == 300
+        assert result.total_usage.output_tokens == 150
