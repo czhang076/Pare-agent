@@ -18,6 +18,9 @@ from pathlib import Path
 import sys
 from typing import Any
 
+if __package__ in (None, ""):
+    sys.path.append(str(Path(__file__).resolve().parents[1]))
+
 from pare.export.sft_exporter import export_trajectory_jsonl_to_sft
 
 

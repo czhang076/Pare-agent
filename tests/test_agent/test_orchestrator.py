@@ -9,11 +9,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import AsyncIterator
+from unittest.mock import patch
 
 import pytest
 
 from pare.agent.executor import ExecutionResult
 from pare.agent.orchestrator import Agent, AgentConfig
+from pare.agent.verify import Tier2CheckResult
 from pare.llm.base import (
     LLMAdapter,
     LLMResponse,
@@ -140,6 +142,8 @@ class TestFlatMode:
 
         assert result.success is True
         assert result.output == "Nothing to fix."
+        assert len(result.attempts) == 1
+        assert result.attempts[0]["status"] == "success"
 
     @pytest.mark.asyncio
     async def test_flat_run_with_tool(self, tmp_path: Path):
@@ -155,6 +159,33 @@ class TestFlatMode:
 
         assert result.success is True
         assert result.tool_call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_flat_tier2_failure_marks_task_failed(self, tmp_path: Path):
+        llm = MockAgentLLM([_text_response("Finished.")])
+        config = AgentConfig(
+            git_checkpoint=False,
+            use_planning=False,
+            tier2_test_command="pytest -q",
+        )
+        agent = Agent(llm=llm, cwd=tmp_path, registry=_make_registry(), config=config)
+
+        with patch(
+            "pare.agent.orchestrator.run_tier2_check",
+            return_value=Tier2CheckResult(
+                enabled=True,
+                command="pytest -q",
+                passed=False,
+                return_code=1,
+                output="failed",
+            ),
+        ):
+            result = await agent.run("Run task")
+
+        assert result.success is False
+        assert result.stop_reason == "tier2_failed"
+        assert result.tier2_enabled is True
+        assert result.tier2_pass is False
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +241,77 @@ class TestHybridMode:
         assert result.success is True
         assert result.stop_reason == "plan_complete"
         assert result.tool_call_count == 2
+        assert len(result.attempts) == 2
+        assert all(a["status"] == "success" for a in result.attempts)
+
+    @pytest.mark.asyncio
+    async def test_hybrid_tier2_pass_keeps_plan_success(self, tmp_path: Path):
+        llm = MockAgentLLM([
+            _plan_response("One step", [
+                {"step_number": 1, "goal": "Echo", "budget": 5},
+            ]),
+            _tool_call_response("echo", {"text": "ok"}),
+            _text_response("Step done."),
+        ])
+        config = AgentConfig(
+            git_checkpoint=False,
+            use_planning=True,
+            tier2_test_command="pytest -q",
+        )
+        agent = Agent(llm=llm, cwd=tmp_path, registry=_make_registry(), config=config)
+
+        with patch(
+            "pare.agent.orchestrator.run_tier2_check",
+            return_value=Tier2CheckResult(
+                enabled=True,
+                command="pytest -q",
+                passed=True,
+                return_code=0,
+                output="ok",
+            ),
+        ) as mock_tier2:
+            result = await agent.run("Echo")
+
+        assert result.success is True
+        assert result.stop_reason == "plan_complete"
+        assert result.tier2_enabled is True
+        assert result.tier2_pass is True
+        mock_tier2.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_hybrid_tier2_failure_stops_plan(self, tmp_path: Path):
+        llm = MockAgentLLM([
+            _plan_response("One step", [
+                {"step_number": 1, "goal": "Echo", "budget": 5},
+            ]),
+            _tool_call_response("echo", {"text": "ok"}),
+            _text_response("Step done."),
+        ])
+        config = AgentConfig(
+            git_checkpoint=False,
+            use_planning=True,
+            tier2_test_command="pytest -q",
+        )
+        agent = Agent(llm=llm, cwd=tmp_path, registry=_make_registry(), config=config)
+
+        with patch(
+            "pare.agent.orchestrator.run_tier2_check",
+            return_value=Tier2CheckResult(
+                enabled=True,
+                command="pytest -q",
+                passed=False,
+                return_code=1,
+                output="failed",
+            ),
+        ):
+            result = await agent.run("Echo")
+
+        assert result.success is False
+        assert result.stop_reason == "tier2_failed"
+        assert result.tier2_enabled is True
+        assert result.tier2_pass is False
+        assert len(result.attempts) == 1
+        assert result.attempts[0]["failure_reason"] == "tier2_failed"
 
     @pytest.mark.asyncio
     async def test_hybrid_stops_on_budget_exceeded_no_replan(self, tmp_path: Path):

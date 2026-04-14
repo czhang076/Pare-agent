@@ -9,9 +9,14 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable
 
-SCHEMA_VERSION = "1.0"
+if TYPE_CHECKING:
+    from pare.trajectory.schema_v2 import ToolCallEvent
+
+SCHEMA_VERSION = "2.0"
+
+_COMPATIBLE_VERSIONS = {"1.0", "2.0"}
 
 _ATTEMPT_STATUSES = {"success", "failed", "budget_exhausted", "error"}
 
@@ -210,6 +215,7 @@ class TrajectoryRecord:
     llm_claimed_success: bool
     verification: VerificationResult
     attempts: list[StepAttempt] = field(default_factory=list)
+    tool_call_events: list[ToolCallEvent] = field(default_factory=list)
     token_usage: TokenUsageSummary = field(default_factory=TokenUsageSummary)
     metadata: dict[str, str] = field(default_factory=dict)
 
@@ -228,13 +234,14 @@ class TrajectoryRecord:
                 "llm_claimed_success",
                 "verification",
             },
-            optional={"attempts", "token_usage", "metadata"},
+            optional={"attempts", "tool_call_events", "token_usage", "metadata"},
             context="trajectory",
         )
 
-        if data["schema_version"] != SCHEMA_VERSION:
+        if data["schema_version"] not in _COMPATIBLE_VERSIONS:
             raise SchemaValidationError(
-                f"trajectory.schema_version: expected {SCHEMA_VERSION}, got {data['schema_version']}"
+                f"trajectory.schema_version: expected one of {sorted(_COMPATIBLE_VERSIONS)}, "
+                f"got {data['schema_version']}"
             )
 
         for key in ("trajectory_id", "instance_id", "task", "model"):
@@ -253,6 +260,13 @@ class TrajectoryRecord:
         attempts_raw = data.get("attempts", [])
         _expect_type(attempts_raw, list, "trajectory.attempts")
         attempts = [StepAttempt.from_dict(item) for item in attempts_raw]
+
+        # Tool-call-level events (v2, optional for backward compat with v1)
+        from pare.trajectory.schema_v2 import ToolCallEvent as TCEvent
+
+        tc_events_raw = data.get("tool_call_events", [])
+        _expect_type(tc_events_raw, list, "trajectory.tool_call_events")
+        tool_call_events = [TCEvent.from_dict(item) for item in tc_events_raw]
 
         token_usage_raw = data.get("token_usage")
         token_usage = (
@@ -280,6 +294,7 @@ class TrajectoryRecord:
             llm_claimed_success=data["llm_claimed_success"],
             verification=verification,
             attempts=attempts,
+            tool_call_events=tool_call_events,
             token_usage=token_usage,
             metadata=metadata,
         )
@@ -306,6 +321,7 @@ class TrajectoryRecord:
             "llm_claimed_success": self.llm_claimed_success,
             "verification": self.verification.to_dict(),
             "attempts": [attempt.to_dict() for attempt in self.attempts],
+            "tool_call_events": [evt.to_dict() for evt in self.tool_call_events],
             "token_usage": self.token_usage.to_dict(),
             "metadata": dict(self.metadata),
         }
@@ -336,3 +352,11 @@ def write_trajectory_jsonl(path: Path, records: Iterable[TrajectoryRecord]) -> N
         for record in records:
             f.write(record.to_json_line())
             f.write("\n")
+
+
+def append_trajectory_jsonl(path: Path, record: TrajectoryRecord) -> None:
+    """Append a single trajectory record to a JSONL file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(record.to_json_line())
+        f.write("\n")

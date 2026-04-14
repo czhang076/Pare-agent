@@ -26,6 +26,7 @@ from pare.llm.base import (
     TokenUsage,
 )
 from pare.main import build_parser
+from pare.trajectory.schema import load_trajectory_jsonl
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +56,10 @@ class TestHeadlessArgs:
         assert args.task == "fix bug"
         assert args.provider == "openai"
         assert args.output is None
+        assert args.trajectory_jsonl is None
+        assert args.instance_id == "local-run"
+        assert args.test_command is None
+        assert args.test_timeout == 300
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +86,11 @@ class TestResultToDict:
         assert d["output"] == "Fixed the bug."
         assert d["stop_reason"] == "end_turn"
         assert d["tool_call_count"] == 3
+        assert d["verification"]["final_passed"] is True
+        assert d["verification"]["tier1_pass"] is True
+        assert d["verification"]["tier2_pass"] is False
+        assert d["verification"]["tier2_command"] == ""
+        assert d["verification"]["tier2_return_code"] is None
         assert d["usage"]["input_tokens"] == 500
         assert d["usage"]["output_tokens"] == 200
         assert d["usage"]["total_tokens"] == 700
@@ -100,6 +110,9 @@ class TestResultToDict:
 
         assert d["success"] is False
         assert d["stop_reason"] == "error"
+        assert d["verification"]["final_passed"] is False
+        assert d["verification"]["tier1_pass"] is True
+        assert d["verification"]["tier2_pass"] is False
         assert d["usage"]["total_tokens"] == 100
 
 
@@ -222,6 +235,54 @@ class TestRunHeadless:
         assert output.exists()
 
     @pytest.mark.asyncio
+    async def test_writes_trajectory_jsonl(self, tmp_path: Path):
+        trajectory_path = tmp_path / "traj" / "run.jsonl"
+
+        with patch("pare.cli.headless.create_llm", return_value=MockHeadlessLLM("Done.")):
+            code = await run_headless(
+                task="Fix parser",
+                api_key="test-key",
+                cwd=tmp_path,
+                trajectory_path=trajectory_path,
+                instance_id="swe-001",
+                seed=7,
+            )
+
+        assert code == 0
+        assert trajectory_path.exists()
+
+        records = load_trajectory_jsonl(trajectory_path)
+        assert len(records) == 1
+        record = records[0]
+        assert record.instance_id == "swe-001"
+        assert record.seed == 7
+        assert record.task == "Fix parser"
+        assert record.verification.final_passed is True
+        assert record.verification.tier1_pass is True
+        assert record.verification.tier2_pass is False
+        assert record.llm_claimed_success is True
+        assert record.attempts[0].status == "success"
+
+    @pytest.mark.asyncio
+    async def test_output_includes_trajectory_fields_when_enabled(self, tmp_path: Path):
+        output = tmp_path / "result.json"
+        trajectory_path = tmp_path / "traj.jsonl"
+
+        with patch("pare.cli.headless.create_llm", return_value=MockHeadlessLLM("Done.")):
+            code = await run_headless(
+                task="Task",
+                api_key="test-key",
+                cwd=tmp_path,
+                output_path=output,
+                trajectory_path=trajectory_path,
+            )
+
+        assert code == 0
+        data = json.loads(output.read_text())
+        assert "trajectory_id" in data
+        assert data["trajectory_path"].endswith("traj.jsonl")
+
+    @pytest.mark.asyncio
     async def test_json_is_valid_and_complete(self, tmp_path: Path):
         """Verify all expected keys are present in the JSON output."""
         output = tmp_path / "result.json"
@@ -235,8 +296,16 @@ class TestRunHeadless:
             )
 
         data = json.loads(output.read_text())
-        expected_keys = {"success", "output", "stop_reason", "tool_call_count", "usage", "elapsed_seconds"}
+        expected_keys = {
+            "success", "output", "stop_reason", "tool_call_count",
+            "verification", "usage", "elapsed_seconds",
+        }
         assert set(data.keys()) == expected_keys
+
+        verification_keys = {
+            "final_passed", "tier1_pass", "tier2_pass", "tier2_command", "tier2_return_code"
+        }
+        assert set(data["verification"].keys()) == verification_keys
 
         usage_keys = {"input_tokens", "output_tokens", "total_tokens", "cache_read_tokens", "cache_create_tokens"}
         assert set(data["usage"].keys()) == usage_keys

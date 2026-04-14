@@ -12,6 +12,7 @@ from pare.trajectory.recovery_detector import (
     highest_recovery_level,
 )
 from pare.trajectory.schema import (
+    append_trajectory_jsonl,
     SCHEMA_VERSION,
     SchemaValidationError,
     StepAttempt,
@@ -26,6 +27,7 @@ __all__ = [
     "ClassificationResult",
     "TrajectoryClassifier",
     "TrajectoryLabel",
+    "append_trajectory_jsonl",
     "RecoveryEvent",
     "RecoveryLevel",
     "SCHEMA_VERSION",

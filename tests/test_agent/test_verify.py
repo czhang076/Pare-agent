@@ -10,6 +10,7 @@ Tests cover:
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import AsyncIterator
 from unittest.mock import patch
@@ -17,7 +18,7 @@ from unittest.mock import patch
 import pytest
 
 from pare.agent.executor import ReActExecutor
-from pare.agent.verify import git_diff_check, syntax_check
+from pare.agent.verify import git_diff_check, run_tier2_check, syntax_check
 from pare.llm.base import (
     LLMAdapter,
     LLMResponse,
@@ -130,6 +131,42 @@ class TestGitDiffCheck:
     def test_not_a_git_repo(self, tmp_path: Path):
         """Non-git directory returns True (fail-open)."""
         assert git_diff_check(tmp_path) is True
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: run_tier2_check
+# ---------------------------------------------------------------------------
+
+
+class TestTier2Check:
+    def test_disabled_when_command_empty(self, tmp_path: Path):
+        result = run_tier2_check(tmp_path, None)
+        assert result.enabled is False
+        assert result.command == ""
+        assert result.passed is False
+
+    def test_success_command(self, tmp_path: Path):
+        script = tmp_path / "ok.py"
+        script.write_text("print('ok')\n", encoding="utf-8")
+        cmd = f'"{sys.executable}" "{script}"'
+
+        result = run_tier2_check(tmp_path, cmd)
+
+        assert result.enabled is True
+        assert result.passed is True
+        assert result.return_code == 0
+        assert "ok" in result.output
+
+    def test_failure_command(self, tmp_path: Path):
+        script = tmp_path / "fail.py"
+        script.write_text("import sys\nsys.exit(2)\n", encoding="utf-8")
+        cmd = f'"{sys.executable}" "{script}"'
+
+        result = run_tier2_check(tmp_path, cmd)
+
+        assert result.enabled is True
+        assert result.passed is False
+        assert result.return_code == 2
 
 
 # ---------------------------------------------------------------------------

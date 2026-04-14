@@ -23,6 +23,7 @@ from pare.agent.executor import (
 from pare.agent.guardrails import GuardrailConfig, Guardrails
 from pare.agent.orient import RepoScanner
 from pare.agent.planner import Plan, PlanStep, Planner
+from pare.agent.verify import Tier2CheckResult, run_tier2_check
 from pare.context.compactor import CompactionConfig
 from pare.context.manager import ContextManager
 from pare.llm.base import LLMAdapter, Message, TokenUsage
@@ -77,6 +78,8 @@ class AgentConfig:
     max_tool_result_lines: int = 200
     git_checkpoint: bool = True
     use_planning: bool = False  # True = Orient → Plan → Execute
+    tier2_test_command: str | None = None
+    tier2_timeout_seconds: int = 300
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +199,57 @@ class Agent:
             on_text_delta=on_text_delta,
         )
 
+        tier2 = Tier2CheckResult(enabled=False)
+        if result.success:
+            tier2 = self._run_tier2_verification()
+            if tier2.enabled:
+                self._log(
+                    "verify",
+                    check="tier2",
+                    command=tier2.command,
+                    passed=tier2.passed,
+                    return_code=tier2.return_code,
+                )
+
+            if tier2.enabled and not tier2.passed:
+                result = ExecutionResult(
+                    success=False,
+                    output=result.output,
+                    messages=result.messages,
+                    tool_call_count=result.tool_call_count,
+                    stop_reason="tier2_failed",
+                    total_usage=result.total_usage,
+                    tier1_pass=result.tier1_pass,
+                    tier2_enabled=True,
+                    tier2_pass=False,
+                    tier2_command=tier2.command,
+                    tier2_output=tier2.output,
+                    tier2_return_code=tier2.return_code,
+                    tier2_error=tier2.error,
+                    llm_claimed_success=result.llm_claimed_success,
+                    attempts=result.attempts,
+                )
+            else:
+                result = ExecutionResult(
+                    success=result.success,
+                    output=result.output,
+                    messages=result.messages,
+                    tool_call_count=result.tool_call_count,
+                    stop_reason=result.stop_reason,
+                    total_usage=result.total_usage,
+                    tier1_pass=result.tier1_pass,
+                    tier2_enabled=tier2.enabled,
+                    tier2_pass=tier2.passed if tier2.enabled else False,
+                    tier2_command=tier2.command,
+                    tier2_output=tier2.output,
+                    tier2_return_code=tier2.return_code,
+                    tier2_error=tier2.error,
+                    llm_claimed_success=result.llm_claimed_success,
+                    attempts=result.attempts,
+                )
+
+        result = self._with_flat_attempt(task, result)
+
         for msg in result.messages:
             self._context.history.append(msg)
 
@@ -222,6 +276,10 @@ class Agent:
         all_messages: list[Message] = []
         total_tool_calls = 0
         total_usage = TokenUsage(input_tokens=0, output_tokens=0)
+        tier1_pass = True
+        tier2 = Tier2CheckResult(enabled=False)
+        tier2_failed = False
+        llm_claimed_success = True
 
         for step in plan.steps:
             step.status = "in_progress"
@@ -266,11 +324,37 @@ class Agent:
             all_messages.extend(result.messages)
             total_tool_calls += result.tool_call_count
             total_usage = total_usage + result.total_usage
+            tier1_pass = tier1_pass and result.tier1_pass
+            llm_claimed_success = llm_claimed_success and result.llm_claimed_success
 
             for msg in result.messages:
                 self._context.history.append(msg)
 
             if result.success:
+                tier2 = self._run_tier2_verification()
+                if tier2.enabled:
+                    self._log(
+                        "verify",
+                        check="tier2",
+                        step=step.step_number,
+                        command=tier2.command,
+                        passed=tier2.passed,
+                        return_code=tier2.return_code,
+                    )
+
+                    if not tier2.passed:
+                        tier2_failed = True
+                        step.status = "failed"
+                        step.failure_reason = "tier2_failed"
+                        self._log(
+                            "agent_event",
+                            phase="step_failed",
+                            step=step.step_number,
+                            reason="tier2_failed",
+                            tool_calls=result.tool_call_count,
+                        )
+                        break
+
                 step.status = "completed"
                 step.summary = (result.output or "")[:200]
                 self._log("agent_event", phase="step_complete",
@@ -292,7 +376,7 @@ class Agent:
                 break
 
         # Build final result
-        success = plan.is_complete
+        success = plan.is_complete and not tier2_failed
         final_text = ""
         if all_messages:
             for msg in reversed(all_messages):
@@ -316,8 +400,20 @@ class Agent:
             output=final_text,
             messages=all_messages,
             tool_call_count=total_tool_calls,
-            stop_reason="plan_complete" if success else "plan_failed",
+            stop_reason=(
+                "plan_complete" if success
+                else ("tier2_failed" if tier2_failed else "plan_failed")
+            ),
             total_usage=total_usage,
+            tier1_pass=tier1_pass,
+            tier2_enabled=tier2.enabled,
+            tier2_pass=tier2.enabled and tier2.passed and success,
+            tier2_command=tier2.command,
+            tier2_output=tier2.output,
+            tier2_return_code=tier2.return_code,
+            tier2_error=tier2.error,
+            llm_claimed_success=llm_claimed_success,
+            attempts=self._plan_to_attempts(plan),
         )
 
     # ------------------------------------------------------------------
@@ -399,6 +495,87 @@ class Agent:
         except Exception as e:
             logger.warning("Orient phase failed: %s", e)
             return f"Working directory: {self.cwd}"
+
+    def _run_tier2_verification(self) -> Tier2CheckResult:
+        return run_tier2_check(
+            self.cwd,
+            self.config.tier2_test_command,
+            timeout_seconds=self.config.tier2_timeout_seconds,
+        )
+
+    @staticmethod
+    def _status_from_result(result: ExecutionResult) -> str:
+        if result.success:
+            return "success"
+        if result.stop_reason == "budget_exhausted":
+            return "budget_exhausted"
+        if result.stop_reason == "error":
+            return "error"
+        return "failed"
+
+    def _with_flat_attempt(self, task: str, result: ExecutionResult) -> ExecutionResult:
+        if result.attempts:
+            return result
+
+        status = self._status_from_result(result)
+        attempts = [
+            {
+                "step_number": 1,
+                "attempt_number": 1,
+                "goal": task[:200],
+                "status": status,
+                "rolled_back": False,
+                "target_files": [],
+                "tool_names": [],
+                "failure_reason": "" if status == "success" else result.stop_reason,
+            }
+        ]
+        return ExecutionResult(
+            success=result.success,
+            output=result.output,
+            messages=result.messages,
+            tool_call_count=result.tool_call_count,
+            stop_reason=result.stop_reason,
+            total_usage=result.total_usage,
+            tier1_pass=result.tier1_pass,
+            tier2_enabled=result.tier2_enabled,
+            tier2_pass=result.tier2_pass,
+            tier2_command=result.tier2_command,
+            tier2_output=result.tier2_output,
+            tier2_return_code=result.tier2_return_code,
+            tier2_error=result.tier2_error,
+            llm_claimed_success=result.llm_claimed_success,
+            attempts=attempts,
+        )
+
+    def _plan_to_attempts(self, plan: Plan) -> list[dict]:
+        attempts: list[dict] = []
+        for step in plan.steps:
+            if step.status == "pending":
+                continue
+
+            status = "failed"
+            if step.status == "completed":
+                status = "success"
+            elif step.status == "budget_exceeded" or step.failure_reason == "budget_exhausted":
+                status = "budget_exhausted"
+            elif step.failure_reason == "error":
+                status = "error"
+
+            attempts.append(
+                {
+                    "step_number": step.step_number,
+                    "attempt_number": 1,
+                    "goal": step.goal,
+                    "status": status,
+                    "rolled_back": False,
+                    "target_files": list(step.target_files),
+                    "tool_names": list(step.expected_tools),
+                    "failure_reason": step.failure_reason,
+                }
+            )
+
+        return attempts
 
     def _log(self, event_type: str, **data) -> None:
         if self.event_log:

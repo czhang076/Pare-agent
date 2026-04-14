@@ -41,6 +41,8 @@ from pare.tools.base import ToolContext, ToolRegistry, ToolResult
 from pare.agent.guardrails import Guardrails
 from pare.agent.verify import syntax_check, git_diff_check
 from pare.telemetry import EventLog
+from pare.trajectory.schema_v2 import ErrorSignal
+from pare.trajectory.schema_v2 import ToolCallEvent as TrajectoryToolCallEvent
 
 import re
 
@@ -72,6 +74,16 @@ class ExecutionResult:
     tool_call_count: int = 0
     stop_reason: str = "end_turn"  # end_turn | budget_exhausted | error | max_tokens
     total_usage: TokenUsage = field(default_factory=lambda: TokenUsage(input_tokens=0, output_tokens=0))
+    tier1_pass: bool = True
+    tier2_enabled: bool = False
+    tier2_pass: bool = False
+    tier2_command: str = ""
+    tier2_output: str = ""
+    tier2_return_code: int | None = None
+    tier2_error: str = ""
+    llm_claimed_success: bool = False
+    attempts: list[dict] = field(default_factory=list)
+    tool_call_events: list[TrajectoryToolCallEvent] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -159,6 +171,12 @@ class ReActExecutor:
         final_text = ""
         total_usage = TokenUsage(input_tokens=0, output_tokens=0)
         diff_warned = False  # Tier 1: only warn about empty diff once
+        tier1_pass = True
+
+        # Tool-call-level recording (schema v2)
+        recorded_events: list[TrajectoryToolCallEvent] = []
+        global_call_index = 0
+        turn_id = 0
 
         while True:
             # Check per-step iteration limit (from planner budget)
@@ -170,6 +188,8 @@ class ReActExecutor:
                     tool_call_count=total_calls,
                     stop_reason="budget_exhausted",
                     total_usage=total_usage,
+                    tier1_pass=tier1_pass,
+                    tool_call_events=recorded_events,
                 )
 
             # Check total budget before calling LLM
@@ -181,6 +201,8 @@ class ReActExecutor:
                     tool_call_count=total_calls,
                     stop_reason="budget_exhausted",
                     total_usage=total_usage,
+                    tier1_pass=tier1_pass,
+                    tool_call_events=recorded_events,
                 )
 
             # Call LLM
@@ -205,6 +227,8 @@ class ReActExecutor:
                     tool_call_count=total_calls,
                     stop_reason="error",
                     total_usage=total_usage,
+                    tier1_pass=tier1_pass,
+                    tool_call_events=recorded_events,
                 )
 
             iterations += 1
@@ -238,6 +262,7 @@ class ReActExecutor:
                     and not git_diff_check(context.cwd)
                 ):
                     diff_warned = True
+                    tier1_pass = False
                     self._log("verify", check="diff_empty")
                     conversation.append(Message(
                         role="user",
@@ -258,10 +283,14 @@ class ReActExecutor:
                     tool_call_count=total_calls,
                     stop_reason=stop,
                     total_usage=total_usage,
+                    tier1_pass=tier1_pass,
+                    llm_claimed_success=True,
+                    tool_call_events=recorded_events,
                 )
 
             # Execute tool calls
             result_blocks: list[ContentBlock] = []
+            call_index_in_turn = 0
 
             for tc in response.tool_calls:
                 event = ToolCallEvent(tool_name=tc.name, arguments=tc.arguments)
@@ -277,6 +306,21 @@ class ReActExecutor:
                     if on_tool_call:
                         on_tool_call(event)
 
+                    # Record blocked call in trajectory
+                    recorded_events.append(TrajectoryToolCallEvent.create(
+                        turn_id=turn_id,
+                        call_index_in_turn=call_index_in_turn,
+                        global_index=global_call_index,
+                        tool_name=tc.name,
+                        params=tc.arguments,
+                        result_success=False,
+                        result_content=f"[BLOCKED] {block_msg}",
+                        timestamp=time.time(),
+                        error_signal=ErrorSignal.BLOCKED,
+                    ))
+                    global_call_index += 1
+                    call_index_in_turn += 1
+
                     result_blocks.append(
                         ContentBlock(
                             type=ContentBlockType.TOOL_RESULT,
@@ -289,6 +333,22 @@ class ReActExecutor:
                 # Check if tool exists
                 if tc.name not in self.registry:
                     error_msg = f"Unknown tool: '{tc.name}'. Available: {self.registry.tool_names}"
+
+                    # Record unknown tool call in trajectory
+                    recorded_events.append(TrajectoryToolCallEvent.create(
+                        turn_id=turn_id,
+                        call_index_in_turn=call_index_in_turn,
+                        global_index=global_call_index,
+                        tool_name=tc.name,
+                        params=tc.arguments,
+                        result_success=False,
+                        result_content=error_msg,
+                        timestamp=time.time(),
+                        error_signal=ErrorSignal.OTHER,
+                    ))
+                    global_call_index += 1
+                    call_index_in_turn += 1
+
                     result_blocks.append(
                         ContentBlock(
                             type=ContentBlockType.TOOL_RESULT,
@@ -330,6 +390,7 @@ class ReActExecutor:
                         full_path = (context.cwd / edited_path).resolve()
                         syntax_err = syntax_check(full_path)
                         if syntax_err:
+                            tier1_pass = False
                             result = ToolResult(
                                 success=True,
                                 output=f"{result.output}\n\n⚠ SYNTAX ERROR: {syntax_err}\nPlease fix this before continuing.",
@@ -347,6 +408,21 @@ class ReActExecutor:
                 result_obj = ToolResult(success=result.success, output=result_text)
                 result_text = result_obj.truncate(max_lines=200).output
 
+                # Record executed tool call in trajectory (error_signal=NONE
+                # at recording time; Phase 2.2 extractor classifies later)
+                recorded_events.append(TrajectoryToolCallEvent.create(
+                    turn_id=turn_id,
+                    call_index_in_turn=call_index_in_turn,
+                    global_index=global_call_index,
+                    tool_name=tc.name,
+                    params=tc.arguments,
+                    result_success=result.success,
+                    result_content=result_text[:2000],
+                    timestamp=time.time(),
+                ))
+                global_call_index += 1
+                call_index_in_turn += 1
+
                 result_blocks.append(
                     ContentBlock(
                         type=ContentBlockType.TOOL_RESULT,
@@ -354,6 +430,9 @@ class ReActExecutor:
                         text=result_text,
                     )
                 )
+
+            # Advance turn counter after processing all tool calls in this response
+            turn_id += 1
 
             # Add tool results to conversation
             conversation.append(Message(role="tool_result", content=result_blocks))

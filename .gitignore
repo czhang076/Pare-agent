@@ -48,3 +48,7 @@ Thumbs.db
 MEMORY.md
 topics/
 .pare/
+.pare_sessions/
+data/
+*.jsonl
+*.log

@@ -22,11 +22,21 @@ import os
 import sys
 import time
 from pathlib import Path
+from uuid import uuid4
 
 from pare.agent.executor import ExecutionResult
+from pare.agent.guardrails import GuardrailConfig
 from pare.agent.orchestrator import Agent, AgentConfig
 from pare.llm import create_llm
 from pare.telemetry import EventLog
+from pare.trajectory.schema import (
+    SCHEMA_VERSION,
+    StepAttempt,
+    TokenUsageSummary,
+    TrajectoryRecord,
+    VerificationResult,
+    append_trajectory_jsonl,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +61,13 @@ def _result_to_dict(result: ExecutionResult) -> dict:
         "output": result.output,
         "stop_reason": result.stop_reason,
         "tool_call_count": result.tool_call_count,
+        "verification": {
+            "final_passed": result.success,
+            "tier1_pass": result.tier1_pass,
+            "tier2_pass": result.tier2_pass,
+            "tier2_command": result.tier2_command,
+            "tier2_return_code": result.tier2_return_code,
+        },
         "usage": {
             "input_tokens": result.total_usage.input_tokens,
             "output_tokens": result.total_usage.output_tokens,
@@ -61,6 +78,75 @@ def _result_to_dict(result: ExecutionResult) -> dict:
     }
 
 
+def _build_trajectory_record(
+    *,
+    task: str,
+    instance_id: str,
+    provider: str,
+    model: str,
+    seed: int,
+    created_at: float,
+    elapsed_seconds: float,
+    result: ExecutionResult,
+) -> TrajectoryRecord:
+    attempts: list[StepAttempt] = []
+    for raw in result.attempts:
+        if isinstance(raw, dict):
+            attempts.append(StepAttempt.from_dict(raw))
+
+    if not attempts:
+        attempts = [
+            StepAttempt(
+                step_number=1,
+                attempt_number=1,
+                goal=task[:200],
+                status="success" if result.success else "failed",
+                rolled_back=False,
+                target_files=[],
+                tool_names=[],
+                failure_reason="" if result.success else result.stop_reason,
+            )
+        ]
+
+    verification = VerificationResult(
+        final_passed=result.success,
+        tier1_pass=result.tier1_pass,
+        tier2_pass=result.tier2_pass,
+        tier2_command=result.tier2_command,
+    )
+
+    metadata: dict[str, str] = {
+        "provider": provider,
+        "stop_reason": result.stop_reason,
+        "elapsed_seconds": str(round(elapsed_seconds, 3)),
+    }
+    if result.tier2_error:
+        metadata["tier2_error"] = result.tier2_error
+    if result.tier2_output:
+        metadata["tier2_output"] = result.tier2_output
+
+    return TrajectoryRecord(
+        schema_version=SCHEMA_VERSION,
+        trajectory_id=f"traj-{int(created_at)}-{uuid4().hex[:8]}",
+        instance_id=instance_id,
+        task=task,
+        model=model,
+        seed=seed,
+        created_at=created_at,
+        llm_claimed_success=result.llm_claimed_success,
+        verification=verification,
+        attempts=attempts,
+        tool_call_events=list(result.tool_call_events),
+        token_usage=TokenUsageSummary(
+            input_tokens=result.total_usage.input_tokens,
+            output_tokens=result.total_usage.output_tokens,
+            cache_read_tokens=result.total_usage.cache_read_tokens,
+            cache_create_tokens=result.total_usage.cache_create_tokens,
+        ),
+        metadata=metadata,
+    )
+
+
 async def run_headless(
     task: str,
     provider: str = "openai",
@@ -69,6 +155,14 @@ async def run_headless(
     base_url: str | None = None,
     cwd: Path | None = None,
     output_path: Path | None = None,
+    trajectory_path: Path | None = None,
+    instance_id: str = "local-run",
+    seed: int = 0,
+    test_command: str | None = None,
+    test_timeout: int = 300,
+    use_planning: bool = False,
+    max_tool_calls: int = 100,
+    max_tool_calls_per_step: int = 15,
     verbose: bool = False,
 ) -> int:
     """Run a task in headless mode. Returns exit code (0=success).
@@ -81,6 +175,14 @@ async def run_headless(
         base_url: Custom API base URL.
         cwd: Working directory.
         output_path: Path to write JSON result (optional).
+        trajectory_path: Path to append trajectory JSONL (optional).
+        instance_id: Dataset/sample instance identifier.
+        seed: Run seed for trajectory metadata.
+        test_command: Optional Tier-2 verification command.
+        test_timeout: Timeout for Tier-2 verification command.
+        use_planning: Whether to use Orient -> Plan -> Execute mode.
+        max_tool_calls: Total tool-call budget for one task.
+        max_tool_calls_per_step: Tool-call budget per step.
         verbose: Enable debug logging.
 
     Returns:
@@ -108,14 +210,27 @@ async def run_headless(
         return 2
 
     # Telemetry
-    session_dir = cwd / ".pare"
-    session_dir.mkdir(exist_ok=True)
-    event_log = EventLog(session_dir / f"session_{int(time.time())}.jsonl")
+    # Keep telemetry outside the task repo to avoid interfering with git checkpoints.
+    session_dir = (cwd.parent / ".pare_sessions").resolve()
+    session_dir.mkdir(parents=True, exist_ok=True)
+    event_log = EventLog(session_dir / f"{cwd.name}_session_{int(time.time())}.jsonl")
 
     # Agent — headless=True disables interactive confirmations
+    guardrail_config = GuardrailConfig(
+        max_tool_calls=max_tool_calls,
+        max_tool_calls_per_step=max_tool_calls_per_step,
+    )
+    agent_config = AgentConfig(
+        guardrail_config=guardrail_config,
+        use_planning=use_planning,
+        tier2_test_command=test_command,
+        tier2_timeout_seconds=test_timeout,
+    )
+
     agent = Agent(
         llm=llm,
         cwd=cwd,
+        config=agent_config,
         event_log=event_log,
         headless=True,
     )
@@ -133,11 +248,38 @@ async def run_headless(
 
     # Run
     print(f"[start] task={task[:100]}", file=sys.stderr)
-    print(f"[config] provider={provider} model={llm.model} cwd={cwd}", file=sys.stderr)
+    print(
+        f"[config] provider={provider} model={llm.model} cwd={cwd} "
+        f"planning={'on' if use_planning else 'off'} "
+        f"budget={max_tool_calls}/{max_tool_calls_per_step} "
+        f"tier2={'on' if test_command else 'off'} "
+        f"trajectory={'on' if trajectory_path else 'off'}",
+        file=sys.stderr,
+    )
 
     start = time.time()
     result = await agent.run(task, on_tool_call=on_tool_call)
     elapsed = time.time() - start
+    created_at = time.time()
+
+    trajectory_record: TrajectoryRecord | None = None
+    if trajectory_path:
+        try:
+            trajectory_record = _build_trajectory_record(
+                task=task,
+                instance_id=instance_id,
+                provider=provider,
+                model=llm.model,
+                seed=seed,
+                created_at=created_at,
+                elapsed_seconds=elapsed,
+                result=result,
+            )
+            append_trajectory_jsonl(trajectory_path, trajectory_record)
+            print(f"[trajectory] {trajectory_path}", file=sys.stderr)
+        except Exception as e:
+            print(f"Error writing trajectory JSONL: {e}", file=sys.stderr)
+            return 2
 
     # Finalize checkpoint (squash-merge back)
     await agent.finalize_checkpoint()
@@ -154,6 +296,9 @@ async def run_headless(
     if output_path:
         result_dict = _result_to_dict(result)
         result_dict["elapsed_seconds"] = round(elapsed, 2)
+        if trajectory_record is not None:
+            result_dict["trajectory_id"] = trajectory_record.trajectory_id
+            result_dict["trajectory_path"] = str(trajectory_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(json.dumps(result_dict, indent=2, ensure_ascii=False))
         print(f"[output] {output_path}", file=sys.stderr)

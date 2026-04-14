@@ -54,10 +54,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write structured JSON result to this path.",
     )
     parser.add_argument(
+        "--trajectory-jsonl",
+        default=None,
+        help="Append one trajectory record to this JSONL path.",
+    )
+    parser.add_argument(
+        "--instance-id",
+        default="local-run",
+        help="Instance identifier recorded in trajectory JSONL.",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=None,
         help="Random seed for reproducibility.",
+    )
+    parser.add_argument(
+        "--test-command",
+        default=None,
+        help="Optional Tier-2 verification command (for example: pytest -q).",
+    )
+    parser.add_argument(
+        "--test-timeout",
+        type=int,
+        default=300,
+        help="Timeout in seconds for Tier-2 verification command.",
     )
     parser.add_argument(
         "--verbose", "-v",
@@ -90,6 +111,11 @@ def main() -> None:
         base_url=args.base_url,
         cwd=Path(args.cwd) if args.cwd else None,
         output_path=Path(args.output) if args.output else None,
+        trajectory_path=Path(args.trajectory_jsonl) if args.trajectory_jsonl else None,
+        instance_id=args.instance_id,
+        seed=args.seed if args.seed is not None else 0,
+        test_command=args.test_command,
+        test_timeout=args.test_timeout,
         verbose=args.verbose,
     ))
     sys.exit(exit_code)

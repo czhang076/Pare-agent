@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from pare.trajectory.schema import (
+    append_trajectory_jsonl,
     SCHEMA_VERSION,
     SchemaValidationError,
     StepAttempt,
@@ -90,6 +91,19 @@ class TestSchemaRoundTrip:
 
         assert len(loaded) == 1
         assert loaded[0].trajectory_id == "traj-001"
+
+    def test_append_jsonl(self, tmp_path: Path):
+        path = tmp_path / "trajectory.jsonl"
+        record_a = TrajectoryRecord.from_dict(_sample_payload())
+        payload_b = _sample_payload()
+        payload_b["trajectory_id"] = "traj-002"
+        record_b = TrajectoryRecord.from_dict(payload_b)
+
+        append_trajectory_jsonl(path, record_a)
+        append_trajectory_jsonl(path, record_b)
+
+        loaded = load_trajectory_jsonl(path)
+        assert [r.trajectory_id for r in loaded] == ["traj-001", "traj-002"]
 
 
 class TestSchemaValidation:
