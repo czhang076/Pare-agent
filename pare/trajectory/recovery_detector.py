@@ -1,4 +1,11 @@
-"""Deterministic failure-recovery pattern detection.
+"""Deterministic failure-recovery pattern detection (v1 — DEPRECATED).
+
+DEPRECATED: Step-based recovery detection. Superseded by
+``pare.trajectory.recovery_detector_v2`` which operates on ToolCallEvent
+sequences and is driven by error signals rather than the dead
+``StepAttempt.rolled_back`` field. Kept for backward compatibility with
+``pare.trajectory.classifier`` (also deprecated). Do not build new code
+against this module.
 
 This module identifies failure -> rollback -> success transitions and
 classifies them into recovery levels:
@@ -9,12 +16,18 @@ classifies them into recovery levels:
 
 from __future__ import annotations
 
+import warnings
 from collections import Counter
 from dataclasses import dataclass
 from enum import Enum
 from typing import Sequence
 
 from pare.trajectory.schema import StepAttempt
+
+_DEPRECATION_MSG = (
+    "pare.trajectory.recovery_detector is deprecated; "
+    "use pare.trajectory.recovery_detector_v2 instead."
+)
 
 
 class RecoveryLevel(str, Enum):
@@ -34,13 +47,15 @@ class RecoveryEvent:
 
 
 def detect_recovery_events(attempts: Sequence[StepAttempt]) -> list[RecoveryEvent]:
-    """Detect deterministic failure-recovery events from ordered attempts."""
+    """Detect deterministic failure-recovery events from ordered attempts.
+
+    DEPRECATED — see module docstring.
+    """
+    warnings.warn(_DEPRECATION_MSG, DeprecationWarning, stacklevel=2)
     events: list[RecoveryEvent] = []
 
     for i, failed in enumerate(attempts):
         if failed.status == "success":
-            continue
-        if not failed.rolled_back:
             continue
 
         success_index = _next_success_index(attempts, i + 1)

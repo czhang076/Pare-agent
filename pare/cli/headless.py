@@ -101,7 +101,6 @@ def _build_trajectory_record(
                 attempt_number=1,
                 goal=task[:200],
                 status="success" if result.success else "failed",
-                rolled_back=False,
                 target_files=[],
                 tool_names=[],
                 failure_reason="" if result.success else result.stop_reason,

@@ -165,8 +165,6 @@ class SFTExporter:
             status_msg = f"Attempt status: {attempt.status}."
             if attempt.failure_reason:
                 status_msg += f" Failure reason: {attempt.failure_reason}."
-            if attempt.rolled_back:
-                status_msg += " Rollback applied."
             if attempt.target_files:
                 status_msg += f" Target files: {', '.join(attempt.target_files)}."
 

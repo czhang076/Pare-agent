@@ -429,48 +429,49 @@ Classification is based on deterministic rules derived from Liu et al. (2025) [1
 - [x] Hard verification Tier 2
 - [x] Experiment scripts (generate, classify, materialize workdirs)
 
-### Phase 2: Tool-Call-Centric Pivot (Current — ~3-4 weeks)
+### Phase 2: Tool-Call-Centric Pivot ✅ COMPLETE (2026-04-16)
 
-**Phase 2.1: ToolCallEvent schema + turn_id instrumentation (2-3 days)**
-- [ ] Define `ToolCallEvent` dataclass: `turn_id`, `call_index_in_turn`, `global_index` (monotonic global index to support temporal comparison across turn boundaries), `tool_name`, `params`, `params_hash`, `target_file`, `result_success`, `result_content`, `error_signal`, `timestamp`
-- [ ] Instrument executor to emit `ToolCallEvent` records per tool call
-- [ ] Wire into trajectory JSONL output (alongside existing step-level data)
-- [ ] Tests for schema validation
+**Phase 2.1: ToolCallEvent schema + turn_id instrumentation (2-3 days)** ✅
+- [x] Define `ToolCallEvent` dataclass: `turn_id`, `call_index_in_turn`, `global_index` (monotonic global index to support temporal comparison across turn boundaries), `tool_name`, `params`, `params_hash`, `target_file`, `result_success`, `result_content`, `error_signal`, `timestamp`
+- [x] Instrument executor to emit `ToolCallEvent` records per tool call
+- [x] Wire into trajectory JSONL output (alongside existing step-level data)
+- [x] Tests for schema validation
 
-**Phase 2.2: Error signal extractor (2-3 days)**
-- [ ] Implement `error_signal_extractor.py`: rule-based regex/parser for 9 error signal types (§3.4)
-- [ ] Cover: Python traceback, pytest output, bash errors, compile failures, empty diff, guardrail blocks
-- [ ] Unit tests with real error samples from pilot session logs
-- [ ] Validate precision + recall > 80% on pilot data
+**Phase 2.2: Error signal extractor (2-3 days)** ✅
+- [x] Implement `error_signal_extractor.py`: rule-based regex/parser for 9 error signal types (§3.4)
+- [x] Cover: Python traceback, pytest output, bash errors, compile failures, empty diff, guardrail blocks
+- [x] Unit tests with real error samples from pilot session logs
+- [x] Validate precision + recall > 80% on pilot data
 
-**Phase 2.3: Recovery detector v2 (2-3 days)**
-- [ ] Implement `recovery_detector_v2.py`: find error-correction pairs in `ToolCallEvent` sequence
-- [ ] Assign L1/L2/L3 levels per pair
-- [ ] Set trajectory-level `contains_recovery` boolean
-- [ ] Tests for all recovery level patterns
+**Phase 2.3: Recovery detector v2 (2-3 days)** ✅
+- [x] Implement `recovery_detector_v2.py`: find error-correction pairs in `ToolCallEvent` sequence
+- [x] Assign L1/L2/L3 levels per pair
+- [x] Set trajectory-level `contains_recovery` boolean
+- [x] Tests for all recovery level patterns
 
-**Phase 2.4a: Liu et al. classifier — core 4 categories (2-3 days)**
-- [ ] Implement `classifier_liu.py` with priority categories: **B2.1** (Logic Error), **B2.2** (Syntax Error), **C1** (False Negative), **C2** (Premature Success)
-- [ ] These 4 are sufficient for H2 (`contains_recovery` detection) and H3 (toxic label = C2 + B2.2)
-- [ ] Each function takes `ToolCallEvent` sequence + verification results → bool
-- [ ] Integration test: classify pilot trajectories
+**Phase 2.4a: Liu et al. classifier — core 4 categories (2-3 days)** ✅
+- [x] Implement `classifier_liu.py` with priority categories: **B2.1** (Logic Error), **B2.2** (Syntax Error), **C1** (False Negative), **C2** (Premature Success)
+- [x] These 4 are sufficient for H2 (`contains_recovery` detection) and H3 (toxic label = C2 + B2.2)
+- [x] Each function takes `ToolCallEvent` sequence + verification results → bool
+- [x] Integration test: classify pilot trajectories
 
-**Phase 2.4b: Liu et al. classifier — extended 4 categories (3-4 days, can overlap with Phase 3)**
-- [ ] Implement: **A1** (Missing Context — requires file_read-before-edit tracking), **A2** (Mislocalization — requires parsing error file refs from tool_result), **B1.1** (Incomplete Fix — requires gold patch diff comparison), **B1.2** (Insufficient Testing — semi-automated, needs manual review on n=50)
-- [ ] A1/A2/B1.1 each need an auxiliary parser (issue text file mentions, unified diff, error file extraction)
-- [ ] These are paper-richness contributions, not H2 critical path
-- [ ] Can be completed during or after Phase 3 pilot without blocking experiment
+**Phase 2.4b: Liu et al. classifier — extended 4 categories (3-4 days, can overlap with Phase 3)** ✅
+- [x] Implement: **A1** (Missing Context — requires file_read-before-edit tracking), **A2** (Mislocalization — requires parsing error file refs from tool_result), **B1.1** (Incomplete Fix — requires gold patch diff comparison), **B1.2** (Insufficient Testing — semi-automated, needs manual review on n=50)
+- [x] A1/A2/B1.1 each need an auxiliary parser (issue text file mentions, unified diff, error file extraction)
+- [x] These are paper-richness contributions, not H2 critical path
+- [x] Can be completed during or after Phase 3 pilot without blocking experiment
+- Note: B1.1 detector accepts `final_diff` / `gold_patch` as optional kwargs; pipeline wiring to an SWE-bench gold-patch source is deferred until Phase 3 instance selection.
 
-**Phase 2.5: Integration (1-2 days)**
-- [ ] Wire new classifier (core 4 categories from 2.4a) into `classify_trajectories.py` experiment script
-- [ ] Update `_build_trajectory_record()` in headless.py to include `ToolCallEvent` data
-- [ ] Verify end-to-end: generate → classify → label distribution
-- [ ] Phase 3 can start after 2.5 completes; Phase 2.4b runs in parallel with Phase 3
+**Phase 2.5: Integration (1-2 days)** ✅
+- [x] Wire new classifier (core 4 categories from 2.4a) into `classify_trajectories.py` experiment script
+- [x] Update `_build_trajectory_record()` in headless.py to include `ToolCallEvent` data
+- [x] Verify end-to-end: generate → classify → label distribution
+- [x] Phase 3 can start after 2.5 completes; Phase 2.4b runs in parallel with Phase 3
 
-**Phase 2.6: Cleanup (1 day)**
-- [ ] Deprecate (not delete) `recovery_detector.py` v1 and `classifier.py` v1
-- [ ] Remove `StepAttempt.rolled_back` field
-- [ ] Update this plan to mark Phase 2 as done
+**Phase 2.6: Cleanup (1 day)** ✅
+- [x] Deprecate (not delete) `recovery_detector.py` v1 and `classifier.py` v1 — emit `DeprecationWarning` on use, kept as regression harness for `pare.curation.sampler`
+- [x] Remove `StepAttempt.rolled_back` field (dead state — never set to True by runtime); `rolled_back` key tolerated on JSONL decode for backward compat
+- [x] Update this plan to mark Phase 2 as done
 
 ### Phase 3: Pilot Experiment (~1-2 weeks)
 
@@ -640,11 +641,13 @@ Negative results will be reported honestly. If H2 doesn't hold, we analyze why a
 
 ### Modules to deprecate (not delete)
 
-| Module | Location | Reason |
+Status (Phase 2.6, 2026-04-16): v1 modules emit `DeprecationWarning` on use; `rolled_back` field removed from `StepAttempt`.
+
+| Module | Location | Status |
 |---|---|---|
-| Recovery detector v1 | `pare/trajectory/recovery_detector.py` | Step-based, relies on `rolled_back` field that was never set |
-| Classifier v1 | `pare/trajectory/classifier.py` | Uses step-based taxonomy, not Liu et al. categories |
-| `StepAttempt.rolled_back` field | `pare/trajectory/schema.py` | Dead state — no code path sets it to True |
+| Recovery detector v1 | `pare/trajectory/recovery_detector.py` | Deprecated — `rolled_back` gate removed; now flags any failed→success pair. Kept only as regression harness. |
+| Classifier v1 | `pare/trajectory/classifier.py` | Deprecated — `TrajectoryClassifier.__init__` warns. Still used by `pare.curation.sampler` pending Phase 3 rewrite. |
+| `StepAttempt.rolled_back` field | `pare/trajectory/schema.py` | **Removed.** Field dropped from dataclass; decoder tolerates the key on legacy JSONL for backward compat. |
 
 ### Target directory structure
 

@@ -228,6 +228,7 @@ class Agent:
                     tier2_error=tier2.error,
                     llm_claimed_success=result.llm_claimed_success,
                     attempts=result.attempts,
+                    tool_call_events=result.tool_call_events,
                 )
             else:
                 result = ExecutionResult(
@@ -246,6 +247,7 @@ class Agent:
                     tier2_error=tier2.error,
                     llm_claimed_success=result.llm_claimed_success,
                     attempts=result.attempts,
+                    tool_call_events=result.tool_call_events,
                 )
 
         result = self._with_flat_attempt(task, result)
@@ -274,6 +276,7 @@ class Agent:
                   steps=len(plan.steps), complexity=plan.estimated_complexity)
 
         all_messages: list[Message] = []
+        all_tool_call_events = []
         total_tool_calls = 0
         total_usage = TokenUsage(input_tokens=0, output_tokens=0)
         tier1_pass = True
@@ -322,6 +325,7 @@ class Agent:
             )
 
             all_messages.extend(result.messages)
+            all_tool_call_events.extend(result.tool_call_events)
             total_tool_calls += result.tool_call_count
             total_usage = total_usage + result.total_usage
             tier1_pass = tier1_pass and result.tier1_pass
@@ -414,6 +418,7 @@ class Agent:
             tier2_error=tier2.error,
             llm_claimed_success=llm_claimed_success,
             attempts=self._plan_to_attempts(plan),
+            tool_call_events=all_tool_call_events,
         )
 
     # ------------------------------------------------------------------
@@ -524,7 +529,6 @@ class Agent:
                 "attempt_number": 1,
                 "goal": task[:200],
                 "status": status,
-                "rolled_back": False,
                 "target_files": [],
                 "tool_names": [],
                 "failure_reason": "" if status == "success" else result.stop_reason,
@@ -546,6 +550,7 @@ class Agent:
             tier2_error=result.tier2_error,
             llm_claimed_success=result.llm_claimed_success,
             attempts=attempts,
+            tool_call_events=result.tool_call_events,
         )
 
     def _plan_to_attempts(self, plan: Plan) -> list[dict]:
@@ -568,7 +573,6 @@ class Agent:
                     "attempt_number": 1,
                     "goal": step.goal,
                     "status": status,
-                    "rolled_back": False,
                     "target_files": list(step.target_files),
                     "tool_names": list(step.expected_tools),
                     "failure_reason": step.failure_reason,

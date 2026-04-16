@@ -148,7 +148,6 @@ class StepAttempt:
     attempt_number: int
     goal: str
     status: str
-    rolled_back: bool = False
     target_files: list[str] = field(default_factory=list)
     tool_names: list[str] = field(default_factory=list)
     failure_reason: str = ""
@@ -158,6 +157,8 @@ class StepAttempt:
         _expect_keys(
             data,
             required={"step_number", "attempt_number", "goal", "status"},
+            # `rolled_back` accepted for backward compat with v1 JSONL
+            # records but dropped on load — field has been removed.
             optional={"rolled_back", "target_files", "tool_names", "failure_reason"},
             context="attempt",
         )
@@ -174,8 +175,6 @@ class StepAttempt:
                 "attempt.status: expected one of "
                 f"{sorted(_ATTEMPT_STATUSES)}, got {data['status']}"
             )
-        if "rolled_back" in data and not isinstance(data["rolled_back"], bool):
-            raise SchemaValidationError("attempt.rolled_back: expected bool")
         if "failure_reason" in data and not isinstance(data["failure_reason"], str):
             raise SchemaValidationError("attempt.failure_reason: expected str")
 
@@ -184,7 +183,6 @@ class StepAttempt:
             attempt_number=data["attempt_number"],
             goal=data["goal"],
             status=data["status"],
-            rolled_back=data.get("rolled_back", False),
             target_files=_expect_str_list(data.get("target_files", []), "attempt.target_files"),
             tool_names=_expect_str_list(data.get("tool_names", []), "attempt.tool_names"),
             failure_reason=data.get("failure_reason", ""),
@@ -196,7 +194,6 @@ class StepAttempt:
             "attempt_number": self.attempt_number,
             "goal": self.goal,
             "status": self.status,
-            "rolled_back": self.rolled_back,
             "target_files": list(self.target_files),
             "tool_names": list(self.tool_names),
             "failure_reason": self.failure_reason,

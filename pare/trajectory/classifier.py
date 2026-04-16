@@ -1,7 +1,16 @@
-"""Deterministic trajectory classifier (zero LLM calls)."""
+"""Deterministic trajectory classifier (v1 — DEPRECATED).
+
+DEPRECATED: Step-based classifier using a bespoke 6-label taxonomy.
+Superseded by ``pare.trajectory.classifier_liu`` (Liu et al. 2025
+taxonomy) paired with ``pare.trajectory.recovery_detector_v2``. The v2
+pipeline is exposed via ``experiments/classify_trajectories.py``. Kept
+for backward compatibility with ``pare.curation.sampler``; do not
+build new code against this module.
+"""
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Sequence
@@ -13,6 +22,11 @@ from pare.trajectory.recovery_detector import (
     highest_recovery_level,
 )
 from pare.trajectory.schema import TrajectoryRecord
+
+_DEPRECATION_MSG = (
+    "pare.trajectory.classifier is deprecated; "
+    "use pare.trajectory.classifier_liu (with recovery_detector_v2) instead."
+)
 
 
 class TrajectoryLabel(str, Enum):
@@ -34,7 +48,13 @@ class ClassificationResult:
 
 
 class TrajectoryClassifier:
-    """Classify trajectories according to deterministic plan rules."""
+    """Classify trajectories according to deterministic plan rules.
+
+    DEPRECATED — see module docstring.
+    """
+
+    def __init__(self) -> None:
+        warnings.warn(_DEPRECATION_MSG, DeprecationWarning, stacklevel=2)
 
     def classify(self, trajectory: TrajectoryRecord) -> ClassificationResult:
         reasons: list[str] = []

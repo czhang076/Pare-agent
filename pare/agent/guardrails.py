@@ -105,8 +105,10 @@ class Guardrails:
                 "Declare this step completed or failed, and move on."
             )
 
-        # 3. Consecutive errors
+        # 3. Consecutive errors — reset counter after blocking so the LLM
+        #    gets a fresh chance next turn (prevents infinite block loop)
         if self.state.consecutive_errors >= self.config.max_consecutive_errors:
+            self.state.consecutive_errors = 0
             return (
                 f"You have failed {self.config.max_consecutive_errors} times in a row. "
                 "Try a completely different approach or declare this step failed."

@@ -1,6 +1,13 @@
-"""Tests for deterministic trajectory classifier."""
+"""Tests for deterministic trajectory classifier (v1 — deprecated).
+
+Kept as a regression harness for the legacy classifier. New code should
+use ``classifier_liu`` (plus ``recovery_detector_v2``) via
+``experiments/classify_trajectories.py``.
+"""
 
 from __future__ import annotations
+
+import pytest
 
 from pare.trajectory.classifier import TrajectoryClassifier, TrajectoryLabel
 from pare.trajectory.recovery_detector import RecoveryLevel
@@ -11,6 +18,15 @@ from pare.trajectory.schema import (
     TrajectoryRecord,
     VerificationResult,
 )
+
+pytestmark = [
+    pytest.mark.filterwarnings(
+        "ignore::DeprecationWarning:pare.trajectory.classifier"
+    ),
+    pytest.mark.filterwarnings(
+        "ignore::DeprecationWarning:pare.trajectory.recovery_detector"
+    ),
+]
 
 
 def _record(
@@ -40,7 +56,6 @@ def _attempt(
     attempt: int,
     status: str,
     *,
-    rolled_back: bool = False,
     goal: str = "Fix parser",
     files: list[str] | None = None,
     tools: list[str] | None = None,
@@ -50,7 +65,6 @@ def _attempt(
         attempt_number=attempt,
         goal=goal,
         status=status,
-        rolled_back=rolled_back,
         target_files=files or [],
         tool_names=tools or [],
     )
@@ -110,7 +124,7 @@ class TestTrajectoryClassifier:
             llm_claimed_success=True,
             verification=VerificationResult(final_passed=True, tier1_pass=True, tier2_pass=True),
             attempts=[
-                _attempt(1, 1, "failed", rolled_back=True, files=["a.py"], tools=["file_edit"]),
+                _attempt(1, 1, "failed", files=["a.py"], tools=["file_edit"]),
                 _attempt(1, 2, "success", files=["a.py"], tools=["file_edit"]),
             ],
         )

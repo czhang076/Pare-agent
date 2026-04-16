@@ -1,4 +1,8 @@
-"""Tests for token-budget-matched sampler."""
+"""Tests for token-budget-matched sampler.
+
+Sampler currently depends on the deprecated v1 classifier; filter the
+DeprecationWarning so these tests don't noise up the output.
+"""
 
 from __future__ import annotations
 
@@ -16,6 +20,15 @@ from pare.trajectory.schema import (
     TrajectoryRecord,
     VerificationResult,
 )
+
+pytestmark = [
+    pytest.mark.filterwarnings(
+        "ignore::DeprecationWarning:pare.trajectory.classifier"
+    ),
+    pytest.mark.filterwarnings(
+        "ignore::DeprecationWarning:pare.trajectory.recovery_detector"
+    ),
+]
 
 
 def _record(
@@ -70,7 +83,6 @@ def _recovery_attempts(step: int = 1) -> list[StepAttempt]:
             attempt_number=1,
             goal="Implement fix",
             status="failed",
-            rolled_back=True,
             target_files=["a.py"],
             tool_names=["file_edit"],
             failure_reason="test failed",
@@ -157,7 +169,6 @@ def _dataset() -> list[TrajectoryRecord]:
                     attempt_number=1,
                     goal="Implement fix",
                     status="failed",
-                    rolled_back=False,
                     target_files=["b.py"],
                     tool_names=["bash"],
                     failure_reason="budget exhausted",
