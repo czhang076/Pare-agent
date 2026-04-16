@@ -111,12 +111,14 @@ class ReActExecutor:
         guardrails: Guardrails | None = None,
         event_log: EventLog | None = None,
         max_iterations: int | None = None,
+        intel_consumer: Callable[[], list[str]] | None = None,
     ) -> None:
         self.llm = llm
         self.registry = registry
         self.guardrails = guardrails or Guardrails()
         self.event_log = event_log
         self.max_iterations = max_iterations
+        self.intel_consumer = intel_consumer
 
     async def run(
         self,
@@ -175,6 +177,13 @@ class ReActExecutor:
                     tool_call_count=total_calls,
                     stop_reason="budget_exhausted",
                 )
+
+            # Pull Eureka intel before calling LLM
+            if self.intel_consumer:
+                new_intel = self.intel_consumer()
+                if new_intel:
+                    intel_msg = "\n\n---\n\n".join(new_intel)
+                    conversation.append(Message(role="user", content=intel_msg))
 
             # Call LLM
             self._log("llm_request", message_count=len(conversation))

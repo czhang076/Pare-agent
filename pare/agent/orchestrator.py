@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from pare.agent.executor import (
     ExecutionResult,
@@ -85,6 +86,7 @@ class AgentConfig:
     max_tool_result_lines: int = 200
     git_checkpoint: bool = True  # Enable git checkpoint safety net
     use_planning: bool = False  # Enable Orient → Plan → Execute hybrid loop
+    use_multiverse: bool = False  # Enable parallel Agentic Multiverse
     max_replans: int = 3  # Max replans before giving up
 
 
@@ -136,6 +138,7 @@ class Agent:
         *,
         on_tool_call: OnToolCall | None = None,
         on_text_delta: OnTextDelta | None = None,
+        intel_consumer: Callable[[], list[str]] | None = None,
     ) -> ExecutionResult:
         """Run the agent on a task.
 
@@ -143,10 +146,14 @@ class Agent:
             task: Natural language description of what to do.
             on_tool_call: Callback for each tool call (for CLI rendering).
             on_text_delta: Callback for streaming LLM text (for CLI rendering).
+            intel_consumer: Optional function to provide async shared intel.
 
         Returns:
             ExecutionResult with the final state and conversation history.
         """
+        if self.config.use_multiverse:
+            return await self._run_multiverse(task, on_tool_call=on_tool_call, on_text_delta=on_text_delta)
+
         self._log("agent_event", phase="start", task=task[:200])
 
         # Set up git checkpoint if enabled and in a git repo
@@ -165,12 +172,14 @@ class Agent:
                 task, system_prompt,
                 on_tool_call=on_tool_call,
                 on_text_delta=on_text_delta,
+                intel_consumer=intel_consumer,
             )
         else:
             result = await self._run_flat(
                 task, system_prompt,
                 on_tool_call=on_tool_call,
                 on_text_delta=on_text_delta,
+                intel_consumer=intel_consumer,
             )
 
         self._log(
@@ -184,8 +193,188 @@ class Agent:
         return result
 
     # ------------------------------------------------------------------
+    # Batch Evaluator & Crucible Integrations
+    # ------------------------------------------------------------------
+
+    async def evaluate_patch(
+        self,
+        base_branch: str,
+        patch_branch: str,
+        test_command: str,
+        *,
+        on_tool_call: OnToolCall | None = None,
+        on_text_delta: OnTextDelta | None = None,
+    ) -> ExecutionResult:
+        """
+        Evaluate an AI-generated patch using The Crucible. If it fails, 
+        trigger the Multiverse Repair Engine to fix it automatically.
+        
+        Args:
+            base_branch: The baseline branch (e.g. main).
+            patch_branch: The branch containing the AI agent's proposed patch.
+            test_command: The command to verify the fix (e.g. 'pytest tests/').
+        """
+        from pare.agent.crucible import Crucible
+
+        self._log("evaluation_event", phase="start", patch=patch_branch)
+        
+        # 1. Run The Crucible (Dual-Blind Cross Validation)
+        crucible = Crucible(self.cwd)
+        result = await crucible.evaluate_patch(base_branch, patch_branch, test_command)
+        
+        if result.passed:
+            self._log("evaluation_event", phase="success", reason=result.reason)
+            return ExecutionResult(
+                success=True,
+                output=f"Patch {patch_branch} PASSED The Crucible.\n{result.reason}",
+                messages=[]
+            )
+            
+        logger.warning("Patch %s FAILED The Crucible: %s", patch_branch, result.reason)
+        self._log("evaluation_event", phase="failed", reason=result.reason)
+
+        # 2. Multiverse Repair Engine
+        # If the patch is bad (reward hacking, or just broken), we trigger Multiverse
+        logger.info("Triggering Multiverse Repair Engine to salvage the patch...")
+        
+        repair_task = (
+            f"The previous AI agent's patch in '{patch_branch}' has failed The Crucible.\n"
+            f"Reason: {result.reason}\n\n"
+            f"Your task is to repair this patch. You must run `{test_command}` and ensure it passes.\n"
+            f"Do not delete assertions to fake a pass. Find the real root cause and fix it."
+        )
+
+        self.config.use_multiverse = True
+        
+        # Make sure we checkout the patch branch for the sandboxes to spawn from
+        import asyncio
+        from pare.sandbox.git_checkpoint import _GIT
+        proc = await asyncio.create_subprocess_exec(_GIT, "checkout", patch_branch, cwd=str(self.cwd))
+        await proc.communicate()
+
+        return await self._run_multiverse(
+            task=repair_task,
+            base_commit=patch_branch, # Multiverse starts from the broken patch
+            on_tool_call=on_tool_call,
+            on_text_delta=on_text_delta
+        )
+
+    # ------------------------------------------------------------------
     # Execution strategies
     # ------------------------------------------------------------------
+
+    async def _run_multiverse(
+        self,
+        task: str,
+        base_commit: str | None = None,
+        *,
+        on_tool_call: OnToolCall | None = None,
+        on_text_delta: OnTextDelta | None = None,
+    ) -> ExecutionResult:
+        """Run the Multiverse Battle Royale."""
+        from pare.sandbox.probe import PreFlightProbe
+        from pare.sandbox.ghost import GhostWorktreeManager
+        from pare.agent.strategy import STRATEGY_DECK, get_strategy
+        from pare.tools.eureka import get_blackboard
+        from pare.tools.eureka_tool import BroadcastEurekaTool
+        from pare.tools.base import create_default_registry
+        import asyncio
+
+        self._log("multiverse_event", phase="start", task=task[:200])
+
+        # 1. Environment pre-flight check
+        probe = PreFlightProbe(self.cwd)
+        is_safe = await probe.run()
+        if not is_safe:
+            logger.warning("Concurrency deemed unsafe. Falling back to single-verse.")
+            # Disable multiverse and run recursively
+            self.config.use_multiverse = False
+            return await self.run(task, on_tool_call=on_tool_call, on_text_delta=on_text_delta)
+
+        manager = GhostWorktreeManager(self.cwd)
+        board = get_blackboard()
+        universe_ids = list(STRATEGY_DECK.keys())
+        
+        # We must clone config without multiverse to not infinite loop
+        base_config = AgentConfig(**self.config.__dict__)
+        base_config.use_multiverse = False
+
+        async def run_universe(uid: str, config) -> tuple[str, ExecutionResult]:
+            # Register for Eureka broadcasts
+            board.register_universe(uid)
+            strategy = get_strategy(uid)
+            
+            u_registry = create_default_registry()
+            u_registry.register(BroadcastEurekaTool(uid))
+            
+            # Setup specific persona prompt
+            u_prompt = f"{base_config.system_prompt}\n\n## Multiverse Strategy\n{strategy.system_prompt_addon}"
+            u_config = AgentConfig(**base_config.__dict__)
+            u_config.system_prompt = u_prompt
+            
+            # Independent agent instance for this worktree
+            u_agent = Agent(
+                llm=self.llm,
+                cwd=config.worktree_path,
+                registry=u_registry,
+                config=u_config,
+                headless=self.headless,
+                event_log=self.event_log
+            )
+            
+            def intel_consumer():
+                return board.consume_intel(uid)
+            
+            # Pass our custom intel consumer straight into the executor
+            # Since we dynamically use run_flat or run_hybrid, we can just monkeypatch 
+            # the agent temporarily or pass it directly.
+            # Wait, better yet, we can modify _run_flat/_run_hybrid to accept intel_consumer
+            result = await u_agent.run(
+                task,
+                intel_consumer=intel_consumer,
+                on_tool_call=on_tool_call, 
+                on_text_delta=on_text_delta
+            )
+            return uid, result
+
+        # Context manager handles all worktrees cleanup
+        async with manager.multiverse_session(universe_ids, base_commit) as universes:
+            tasks = [asyncio.create_task(run_universe(uid, cfg), name=uid) for uid, cfg in universes.items()]
+            
+            winner_uid = None
+            winner_result = None
+            
+            while tasks:
+                done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                for t in done:
+                    uid, result = t.result()
+                    if result.success:
+                        logger.info("Universe %s claimed victory!", uid)
+                        # --- The Crucible ---
+                        # Verify it really works by running tests across the mutated worktree
+                        # For now we'll do a simple baseline validation where we trust the result.
+                        # Real 'Crucible' can execute pytest automatically inside `u_config.worktree_path`
+                        winner_uid = uid
+                        winner_result = result
+                        break
+                    else:
+                        logger.warning("Universe %s failed. Reason: %s", uid, result.stop_reason)
+                
+                if winner_uid:
+                    break
+                tasks = list(pending)
+            
+            if winner_uid:
+                for p in pending:
+                    p.cancel()
+                # Merge the winner back!
+                logger.info("Squash-merging winning Universe %s into main repo...", winner_uid)
+                await manager.squash_merge_winner(winner_uid)
+                self._log("multiverse_event", phase="winner_selected", winner=winner_uid)
+                return winner_result
+            else:
+                self._log("multiverse_event", phase="all_failed")
+                return ExecutionResult(success=False, output="All Multiverse universes failed.", messages=[])
 
     async def _run_flat(
         self,
@@ -194,6 +383,7 @@ class Agent:
         *,
         on_tool_call: OnToolCall | None = None,
         on_text_delta: OnTextDelta | None = None,
+        intel_consumer: Callable[[], list[str]] | None = None,
     ) -> ExecutionResult:
         """Flat ReAct loop — no planning, just execute."""
         context = ToolContext(cwd=self.cwd, headless=self.headless)
@@ -204,6 +394,7 @@ class Agent:
             registry=self.registry,
             guardrails=self._guardrails,
             event_log=self.event_log,
+            intel_consumer=intel_consumer,
         )
 
         # Pre-execution checkpoint
@@ -235,6 +426,7 @@ class Agent:
         *,
         on_tool_call: OnToolCall | None = None,
         on_text_delta: OnTextDelta | None = None,
+        intel_consumer: Callable[[], list[str]] | None = None,
     ) -> ExecutionResult:
         """Hybrid Orient → Plan → Execute loop with per-step budgets and replan."""
         # Generate plan
@@ -285,6 +477,7 @@ class Agent:
                 guardrails=self._guardrails,
                 event_log=self.event_log,
                 max_iterations=step.budget,
+                intel_consumer=intel_consumer,
             )
 
             result = await executor.run(
