@@ -235,7 +235,7 @@ All groups use only **fully_verified** trajectories. The sole variable is recove
 |---|---|---|
 | **A1: Clean-only** | `contains_recovery == False` fully_verified trajectories | Baseline (0% recovery) |
 | **A2: Mixed** | Natural ratio of `verified_one_shot` + `verified_with_recovery` | Natural recovery ratio |
-| **A3: Recovery-enriched** | 2× natural ratio via oversampling `verified_with_recovery` | Sensitivity test |
+| **A3: Recovery-enriched** | 2× natural ratio — prefer sampling **without replacement** (reduce `verified_one_shot` count to raise recovery fraction, keeping each trajectory unique). Fall back to oversampling `verified_with_recovery` with replacement only if the unique recovery pool is too small; when this fallback is used, record the duplication factor and flag it as a limitation (§11.3). | Sensitivity test |
 
 **Module B — H1/H3 (secondary): Does verification quality matter?**
 
@@ -479,6 +479,7 @@ Classification is based on deterministic rules derived from Liu et al. (2025) [1
 - [ ] Run 1 trajectory on a simple SWE-bench instance (sufficient budget: per-step=15, total=60)
 - [ ] Print raw session JSONL, inspect every tool call and result manually
 - [ ] Identify: what do real error messages look like? What recovery patterns actually occur?
+- [ ] Fetch and store gold patch for the selected instance alongside SWE-bench metadata to enable B1.1 classification
 - [ ] **Go/No-Go:** Agent can complete at least read → edit → verify cycle
 
 **Phase 3.2: Error extractor validation (2-3 days)**
@@ -492,6 +493,7 @@ Classification is based on deterministic rules derived from Liu et al. (2025) [1
 - [ ] Run full classification pipeline (Liu categories + recovery detection)
 - [ ] Two-annotator labeling: author + independent annotator label same 20
 - [ ] Compute inter-annotator κ
+- [ ] Wire gold patch loading into B1.1 Incomplete Fix classifier to ensure all 8 Liu et al. categories are tested
 - [ ] **Go/No-Go criteria (all must pass):**
   - κ ≥ 0.7 (inter-annotator agreement on Liu et al. categories)
   - Recovery trajectory ratio ≥ 15% (if < 15%: adopt controlled agent weakening, see below)
@@ -538,11 +540,11 @@ This is an acceptable trade-off: a well-powered interventional study is more inf
 |---|---|---|
 | H2 null result (recovery doesn't help) | Main hypothesis fails | Pre-planned fallback framings: trajectory length bias, recovery type heterogeneity, small model capacity |
 | Too few recovery trajectories (< 15%) | Underpowered experiment | Active injection: intentionally weaken agent (remove Orient, reduce budget) to trigger more failures |
-| Teacher model too good (few failures) | Same as above | Use weaker teacher (Qwen-7B) or harder SWE-bench instances |
+| Teacher model too good (few failures) | Same as above | Adopt controlled agent weakening (reduce per-step budget, remove Orient phase) rather than changing teacher, to prevent trajectory distribution shift |
 | Git exploitation contaminates data | Invalid experimental results | Defender runs before every trajectory, verified in pilot |
 | Classifier disagrees with human labels | Classification methodology invalid | Pilot study catches this, revise rules before scaling |
 | LoRA training doesn't converge | No results | Use proven hyperparams, start with known-good baseline |
-| Compute budget insufficient | Can't run all experiments | Prioritize Module A only (3 groups), defer Module B and ablations. See §11 for budget estimate |
+| Compute budget insufficient | Can't run all experiments | Prioritize Module A only (3 groups), defer Module B and ablations. See §12 for budget estimate |
 | Error signal extractor recall too low | Recovery events systematically missed | Pilot Phase 3.2 validates per-tool-call; target precision + recall > 80%. If recall is low, expand regex or add structured parsers. Must fix before Phase 4 |
 | Controlled failure injection too complex | Delayed Phase 4 start | Dedicated 3-5 day design phase before full experiment. Not allowed to modify injection mechanism after experiment starts |
 
@@ -562,9 +564,39 @@ Negative results will be reported honestly. If H2 doesn't hold, we analyze why a
 
 ---
 
-## 11. Compute & Cost Budget
+## 11. Limitations (for paper Discussion section)
 
-### 11.1 Trajectory generation (Phase 4)
+Pre-written so the experimental design is aware of these from the start; refined against real numbers before submission.
+
+### 11.1 SFT behavior cloning cannot isolate "learned recovery" from "learned error-then-fix sequences"
+
+Supervised fine-tuning on verified-with-recovery trajectories teaches the student to reproduce the distribution of teacher tool-call sequences, including the pattern "failing action → diagnostic action → corrective action." A positive H2 result could mean the student learned **genuine error diagnosis and correction**, or it could mean it learned a **generic error→edit template** that happens to fire when an error-shaped tool result appears in context.
+
+Our controlled failure injection evaluation (§6.5) partially disentangles these: the injected errors are sampled from *different* SWE-bench instances than those in the student's training data, so sequence-level memorization of the exact error-fix pair is unlikely. However, we cannot fully rule out that the student learned a high-level template ("on error, read a file and edit it") rather than instance-grounded repair. Definitively separating the two requires on-policy reinforcement learning with outcome-conditioned rewards (e.g., SCoRe [4]); we leave that to future work and position this paper as behavior-cloning evidence for a necessary-but-not-sufficient condition.
+
+### 11.2 Statistical power on a 50-instance held-out eval is limited
+
+With 50 held-out instances × 3 seeds = 150 runs per group, the minimum detectable effect between two groups (at α=0.05, power=0.80, paired comparison) is roughly a 10 percentage-point absolute difference in recovery rate. Smaller-but-real effects would not register as significant. Consequences:
+
+- Null results on subtle comparisons (e.g., A2 Mixed vs A3 Recovery-enriched, where the natural and enriched ratios differ by only 2×) do **not** license the claim that composition does not matter.
+- The primary A1 vs A2 comparison is designed around the larger expected gap and is where we draw our main conclusion.
+- Per-category ablations (§5.4.2) are exploratory and reported with confidence intervals, not p-values.
+
+If compute permits after the pilot, we will expand the held-out set to 100 instances to roughly halve the detectable effect size.
+
+### 11.3 A3 sampling-with-replacement fallback (conditional limitation)
+
+If the natural pool of `verified_with_recovery` trajectories is too small to reach 2× the natural ratio by downsampling `verified_one_shot` alone, A3 falls back to oversampling recovery trajectories **with replacement**. When this fallback is used, the student sees each duplicated trajectory multiple times across epochs. Any recovery-rate lift observed for A3 under the fallback is then confounded with **trajectory-level memorization**. We will:
+
+- Report the duplication factor (e.g., "each recovery trajectory appears 1.7× on average") alongside A3 results.
+- Hold A2 (natural ratio, no oversampling) as the primary recovery-enriched condition if the fallback is triggered, and relegate A3 to supplementary evidence.
+- Cross-check A3's injected-recovery rate against whether the injected errors *appear* in the duplicated training subset; a lift only on trained-pattern errors would be diagnostic of memorization.
+
+---
+
+## 12. Compute & Cost Budget
+
+### 12.1 Trajectory generation (Phase 4)
 
 | Item | Estimate | Notes |
 |---|---|---|
@@ -575,7 +607,7 @@ Negative results will be reported honestly. If H2 doesn't hold, we analyze why a
 | Total agent wall-clock | ~150 hours | Parallelizable across instances (estimate excludes container lifecycle overhead, actual wall-clock may be 2×+) |
 | Teacher model API cost | ~$150–300 | DeepSeek-V3 at ~$0.20–0.40/trajectory (input+output tokens) |
 
-### 11.2 SFT training (Phase 4)
+### 12.2 SFT training (Phase 4)
 
 | Item | Estimate | Notes |
 |---|---|---|
@@ -587,7 +619,7 @@ Negative results will be reported honestly. If H2 doesn't hold, we analyze why a
 | Total training runs | 15 unique (5 groups × 3 seeds) | A1 baseline shared |
 | Total GPU hours | 90–150 (A100) | |
 
-### 11.3 Evaluation (Phase 4)
+### 12.3 Evaluation (Phase 4)
 
 | Item | Estimate | Notes |
 |---|---|---|
@@ -597,7 +629,7 @@ Negative results will be reported honestly. If H2 doesn't hold, we analyze why a
 | Eval infra | vLLM serving 7B model, 1× A100 | Sequential or batched |
 | HumanEval+ | Lightweight, ~1 hr per group | Standard code generation |
 
-### 11.4 Total budget summary
+### 12.4 Total budget summary
 
 | Resource | Estimate | Fallback (Module A only) |
 |---|---|---|
