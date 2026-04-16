@@ -133,7 +133,7 @@ class ClassificationSummary:
 # ---------------------------------------------------------------------------
 
 
-def classify_one(record: TrajectoryRecord) -> TrajectoryClassificationV2:
+def classify_one(record: TrajectoryRecord, *, gold_patch: str = "") -> TrajectoryClassificationV2:
     """Run the full v2 classification pipeline on one trajectory.
 
     Steps:
@@ -150,8 +150,20 @@ def classify_one(record: TrajectoryRecord) -> TrajectoryClassificationV2:
     else:
         signals = []
 
+    # Final diff approximation: combine all successful file edits
+    final_diff_parts = []
+    for evt in events:
+        if evt.tool_name == "file_edit" and evt.result_success:
+            final_diff_parts.append(evt.result_content)
+    final_diff = "\n".join(final_diff_parts)
+
     # Step 2: Liu et al. classification
-    liu = classify_liu_from_record(record, signals)
+    liu = classify_liu_from_record(
+        record,
+        signals,
+        final_diff=final_diff,
+        gold_patch=gold_patch,
+    )
 
     # Step 3: Recovery detection
     recovery = detect_recovery_events(events, signals)
@@ -178,6 +190,7 @@ def classify_one(record: TrajectoryRecord) -> TrajectoryClassificationV2:
 def classify_trajectories(
     trajectory_jsonl: Path,
     *,
+    tasks_jsonl: Path | None = None,
     labels_jsonl: Path,
     non_toxic_jsonl: Path,
 ) -> ClassificationSummary:
@@ -186,9 +199,23 @@ def classify_trajectories(
     if not trajectories:
         raise ClassificationError("No trajectories found.")
 
+    gold_patches: dict[str, str] = {}
+    if tasks_jsonl and tasks_jsonl.exists():
+        with open(tasks_jsonl, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    task_data = json.loads(line)
+                    if "instance_id" in task_data and "gold_patch" in task_data:
+                        gold_patches[task_data["instance_id"]] = task_data["gold_patch"]
+                except json.JSONDecodeError:
+                    pass
+
     results: list[TrajectoryClassificationV2] = []
     for record in trajectories:
-        results.append(classify_one(record))
+        gp = gold_patches.get(record.instance_id, "")
+        results.append(classify_one(record, gold_patch=gp))
 
     # Aggregate counts
     outcome_counts: Counter[str] = Counter()
@@ -257,6 +284,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--trajectory-jsonl", required=True, help="Input trajectory JSONL path.")
     parser.add_argument(
+        "--tasks-jsonl", default=None,
+        help="Optional input tasks JSONL path (to provide gold_patch for B1.1 detection).",
+    )
+    parser.add_argument(
         "--labels-jsonl", default=None,
         help="Output labels JSONL path (default: <input>.labels.jsonl).",
     )
@@ -280,6 +311,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     trajectory_path = Path(args.trajectory_jsonl)
+    tasks_path = Path(args.tasks_jsonl) if args.tasks_jsonl else None
     labels_path = Path(args.labels_jsonl) if args.labels_jsonl else _default_path(trajectory_path, ".labels.jsonl")
     summary_path = Path(args.summary_json) if args.summary_json else _default_path(trajectory_path, ".summary.json")
     non_toxic_path = Path(args.non_toxic_jsonl) if args.non_toxic_jsonl else _default_path(trajectory_path, ".non_toxic.jsonl")
@@ -287,6 +319,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         summary = classify_trajectories(
             trajectory_path,
+            tasks_jsonl=tasks_path,
             labels_jsonl=labels_path,
             non_toxic_jsonl=non_toxic_path,
         )
