@@ -141,6 +141,34 @@ def ensure_instance_workdir(
     return instance_dir
 
 
+def apply_test_patch(instance_dir: Path, test_patch: str) -> None:
+    """Apply SWE-bench test_patch to the workdir as a scaffolding commit.
+
+    We commit the test_patch so the agent starts from a clean git state with
+    the failing tests already present, and so Pare's checkpoint flow sees a
+    deterministic base commit.
+    """
+    if not test_patch.strip():
+        return
+
+    patch_file = instance_dir / ".pare_test_patch.diff"
+    patch_file.write_text(test_patch, encoding="utf-8", newline="\n")
+
+    _run_git(["git", "-C", str(instance_dir), "apply", "--index", str(patch_file)])
+
+    # Commit with a fixed author to avoid depending on local git config.
+    env_cmd = [
+        "git", "-C", str(instance_dir),
+        "-c", "user.email=pare@local",
+        "-c", "user.name=pare-scaffold",
+        "commit", "-m", "pare: apply SWE-bench test_patch",
+    ]
+    completed = subprocess.run(env_cmd, capture_output=True, text=True)
+    if completed.returncode != 0:
+        stderr = (completed.stderr or "").strip()
+        raise MaterializeError(f"Failed to commit test_patch scaffold: {stderr}")
+
+
 def materialize_tasks(
     tasks: list[dict[str, Any]],
     *,
@@ -173,6 +201,18 @@ def materialize_tasks(
             workdirs_root=workdirs_root,
             overwrite=overwrite,
         )
+
+        test_patch = task.get("test_patch")
+        if isinstance(test_patch, str) and test_patch.strip():
+            # Only apply when the workdir is freshly checked out at base_commit.
+            # If overwrite=False and the dir already existed, skip to avoid
+            # double-applying the patch.
+            head_probe = subprocess.run(
+                ["git", "-C", str(instance_dir), "rev-parse", "HEAD"],
+                capture_output=True, text=True,
+            )
+            if head_probe.returncode == 0 and head_probe.stdout.strip() == base_commit:
+                apply_test_patch(instance_dir, test_patch)
 
         row = dict(task)
         row["cwd"] = str(instance_dir.resolve())

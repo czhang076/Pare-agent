@@ -46,6 +46,11 @@ _PROVIDER_PRESETS: dict[str, dict] = {
         "base_url": "https://openrouter.ai/api/v1",
         "default_model": "deepseek/deepseek-chat",
     },
+    "glm": {
+        # Zhipu AI BigModel — OpenAI-compatible at /api/paas/v4
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "default_model": "glm-5",
+    },
 }
 
 

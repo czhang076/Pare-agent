@@ -6,6 +6,8 @@ import argparse
 import json
 from pathlib import Path
 import random
+import re
+import shlex
 import sys
 from typing import Any
 
@@ -27,6 +29,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repos-root", default=None)
     parser.add_argument("--repo-map-json", default=None)
     parser.add_argument("--include-hints", action="store_true")
+    parser.add_argument(
+        "--instance-ids",
+        default=None,
+        help="Comma-separated instance_id whitelist. Filters records before sampling.",
+    )
     return parser
 
 
@@ -87,6 +94,88 @@ def _default_cwd(repo: str, repos_root: Path | None) -> str | None:
     return str((repos_root / repo.replace("/", "__")).resolve())
 
 
+def _parse_test_list(value: Any) -> list[str]:
+    """Parse SWE-bench FAIL_TO_PASS / PASS_TO_PASS field into list[str].
+
+    The HF dataset stores it as a JSON-encoded string; some mirrors store
+    it already as a list. Silently ignore non-string / empty entries.
+    """
+    if value is None:
+        return []
+    if isinstance(value, list):
+        raw_items = value
+    elif isinstance(value, str):
+        if not value.strip():
+            return []
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(decoded, list):
+            return []
+        raw_items = decoded
+    else:
+        return []
+
+    out: list[str] = []
+    for item in raw_items:
+        if isinstance(item, str) and item.strip():
+            out.append(item.strip())
+    return out
+
+
+_DIFF_FILE_RE = re.compile(r"^diff --git a/(?P<path>\S+) b/\S+", re.MULTILINE)
+
+
+def _test_files_from_patch(test_patch: str) -> list[str]:
+    """Return unique file paths that the test_patch touches."""
+    if not test_patch:
+        return []
+    seen: list[str] = []
+    for match in _DIFF_FILE_RE.finditer(test_patch):
+        path = match.group("path")
+        if path not in seen:
+            seen.append(path)
+    return seen
+
+
+def _build_tier2_command(fail_to_pass: list[str], test_patch: str = "") -> str:
+    """Build a pytest command that asserts the FAIL_TO_PASS set now passes.
+
+    SWE-bench stores FAIL_TO_PASS in two shapes:
+      (a) pytest node ids — `path/test_file.py::TestClass::test_method`
+      (b) bare function names — `test_something` (common in sympy)
+
+    For (a) we pass them positionally. For (b) we scope pytest to the test
+    files from test_patch and use `-k` name filtering; without scoping,
+    pytest would collect the whole suite (minutes of overhead).
+
+    Quoting: each token is shlex-quoted so parametrized ids and names with
+    whitespace survive shell=True on both Unix and Windows.
+
+    The `{python}` placeholder is substituted by the runner with the active
+    interpreter path so tier2 uses the same venv as the pipeline, not
+    whatever `python` happens to resolve to on PATH.
+    """
+    if not fail_to_pass:
+        return ""
+
+    has_node_ids = any("::" in t for t in fail_to_pass)
+    if has_node_ids:
+        quoted = " ".join(shlex.quote(t) for t in fail_to_pass)
+        return f"{{python}} -m pytest {quoted} --tb=short -x --no-header -q"
+
+    test_files = _test_files_from_patch(test_patch)
+    k_expr = " or ".join(fail_to_pass)
+    quoted_k = shlex.quote(k_expr)
+    if test_files:
+        files = " ".join(shlex.quote(f) for f in test_files)
+        return f"{{python}} -m pytest {files} -k {quoted_k} --tb=short -x --no-header -q"
+
+    # Last-resort fallback: run -k over the whole suite.
+    return f"{{python}} -m pytest -k {quoted_k} --tb=short -x --no-header -q"
+
+
 def _task_text(record: dict[str, Any], include_hints: bool) -> str:
     problem = record.get("problem_statement")
     if not isinstance(problem, str) or not problem.strip():
@@ -108,9 +197,19 @@ def prepare_tasks_jsonl(
     repos_root: Path | None = None,
     repo_map: dict[str, str] | None = None,
     include_hints: bool = False,
+    instance_ids: list[str] | None = None,
 ) -> int:
     mapping = repo_map or {}
-    selected = _sample_records(records, sample_size=sample_size, seed=seed)
+    if instance_ids:
+        whitelist = set(instance_ids)
+        filtered = [r for r in records if r.get("instance_id") in whitelist]
+        if not filtered:
+            raise PrepareDatasetError(
+                f"No records matched instance_ids filter: {sorted(whitelist)}"
+            )
+        selected = filtered
+    else:
+        selected = _sample_records(records, sample_size=sample_size, seed=seed)
 
     rows: list[dict[str, Any]] = []
     for record in selected:
@@ -123,12 +222,25 @@ def prepare_tasks_jsonl(
             raise PrepareDatasetError("record missing repo")
 
         cwd = mapping.get(repo) or _default_cwd(repo, repos_root)
+
+        patch = record.get("patch") if isinstance(record.get("patch"), str) else ""
+        test_patch = record.get("test_patch") if isinstance(record.get("test_patch"), str) else ""
+        fail_to_pass = _parse_test_list(record.get("FAIL_TO_PASS"))
+        pass_to_pass = _parse_test_list(record.get("PASS_TO_PASS"))
+
         row: dict[str, Any] = {
             "instance_id": instance_id,
             "task": _task_text(record, include_hints=include_hints),
             "repo": repo,
             "base_commit": base_commit if isinstance(base_commit, str) else "",
+            "gold_patch": patch,
+            "test_patch": test_patch,
+            "fail_to_pass": fail_to_pass,
+            "pass_to_pass": pass_to_pass,
         }
+        tier2_command = _build_tier2_command(fail_to_pass, test_patch=test_patch)
+        if tier2_command:
+            row["tier2_command"] = tier2_command
         if cwd:
             row["cwd"] = cwd
         rows.append(row)
@@ -149,6 +261,13 @@ def main(argv: list[str] | None = None) -> int:
     repos_root = Path(args.repos_root) if args.repos_root else None
     repo_map_path = Path(args.repo_map_json) if args.repo_map_json else None
 
+    instance_ids: list[str] | None = None
+    if args.instance_ids:
+        instance_ids = [tok.strip() for tok in args.instance_ids.split(",") if tok.strip()]
+        if not instance_ids:
+            print("[prepare-failed] --instance-ids provided but empty", file=sys.stderr)
+            return 1
+
     try:
         records = _load_dataset_records(args.split, cache_dir=cache_dir)
         repo_map = _load_repo_map(repo_map_path)
@@ -160,6 +279,7 @@ def main(argv: list[str] | None = None) -> int:
             repos_root=repos_root,
             repo_map=repo_map,
             include_hints=args.include_hints,
+            instance_ids=instance_ids,
         )
     except Exception as e:
         print(f"[prepare-failed] {e}", file=sys.stderr)

@@ -49,6 +49,7 @@ def _resolve_api_key(provider: str, api_key: str | None) -> str | None:
         "openai": "OPENAI_API_KEY",
         "minimax": "MINIMAX_API_KEY",
         "openrouter": "OPENROUTER_API_KEY",
+        "glm": "GLM_API_KEY",
     }
     env_var = env_map.get(provider, f"{provider.upper()}_API_KEY")
     return os.environ.get(env_var)
@@ -302,8 +303,12 @@ async def run_headless(
         output_path.write_text(json.dumps(result_dict, indent=2, ensure_ascii=False))
         print(f"[output] {output_path}", file=sys.stderr)
 
-    # Final text to stdout (for piping)
+    # Final text to stdout (for piping). Encode via stdout's encoding with
+    # errors='replace' so non-ASCII output (e.g. ✓) doesn't crash on
+    # legacy Windows consoles (cp936 / GBK).
     if result.output:
-        print(result.output)
+        enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+        safe = result.output.encode(enc, errors="replace").decode(enc, errors="replace")
+        print(safe)
 
     return 0 if result.success else 1

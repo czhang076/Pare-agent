@@ -4,9 +4,17 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import shutil
+import subprocess
 from unittest.mock import patch
 
-from experiments.materialize_swe_bench_workdirs import main, materialize_tasks
+import pytest
+
+from experiments.materialize_swe_bench_workdirs import (
+    apply_test_patch,
+    main,
+    materialize_tasks,
+)
 
 
 def _tasks() -> list[dict]:
@@ -126,3 +134,66 @@ class TestMaterializeSweBenchWorkdirs:
         assert len(lines) == 2
         payload = json.loads(lines[0])
         assert "cwd" in payload
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
+class TestApplyTestPatch:
+    def _init_repo(self, workdir: Path, filename: str, content: str) -> str:
+        workdir.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-q", "-b", "main", str(workdir)], check=True)
+        subprocess.run(
+            ["git", "-C", str(workdir), "config", "user.email", "t@example.com"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(workdir), "config", "user.name", "test"],
+            check=True,
+        )
+        (workdir / filename).write_text(content, encoding="utf-8", newline="\n")
+        subprocess.run(["git", "-C", str(workdir), "add", filename], check=True)
+        subprocess.run(
+            ["git", "-C", str(workdir), "commit", "-q", "-m", "init"], check=True,
+        )
+        rev = subprocess.run(
+            ["git", "-C", str(workdir), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        )
+        return rev.stdout.strip()
+
+    def test_apply_test_patch_creates_commit(self, tmp_path: Path):
+        workdir = tmp_path / "wd"
+        base_rev = self._init_repo(workdir, "a.py", "x = 1\n")
+
+        patch_text = (
+            "diff --git a/test_new.py b/test_new.py\n"
+            "new file mode 100644\n"
+            "index 0000000..e69de29\n"
+            "--- /dev/null\n"
+            "+++ b/test_new.py\n"
+            "@@ -0,0 +1 @@\n"
+            "+assert True\n"
+        )
+        apply_test_patch(workdir, patch_text)
+
+        assert (workdir / "test_new.py").exists()
+        new_rev = subprocess.run(
+            ["git", "-C", str(workdir), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert new_rev != base_rev
+
+        log = subprocess.run(
+            ["git", "-C", str(workdir), "log", "-1", "--pretty=%s"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert "test_patch" in log
+
+    def test_apply_empty_patch_noop(self, tmp_path: Path):
+        workdir = tmp_path / "wd"
+        base_rev = self._init_repo(workdir, "a.py", "x = 1\n")
+        apply_test_patch(workdir, "")
+        new_rev = subprocess.run(
+            ["git", "-C", str(workdir), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert new_rev == base_rev

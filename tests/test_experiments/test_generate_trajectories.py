@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from experiments.generate_trajectories import (
+    _resolve_tier2_command,
     build_parser,
     GenerationTask,
     generate_trajectories,
@@ -48,6 +49,70 @@ class TestGenerateTrajectories:
         assert len(tasks) == 2
         assert tasks[0].instance_id == "swe-1"
         assert tasks[1].cwd == str(tmp_path)
+
+    def test_load_tasks_jsonl_carries_tier2_command(self, tmp_path: Path):
+        tasks_path = tmp_path / "tasks.jsonl"
+        _write_tasks(tasks_path, [
+            {
+                "instance_id": "swe-1",
+                "task": "Fix bug",
+                "tier2_command": "python -m pytest tests/foo.py::test_x -x",
+            },
+        ])
+        tasks = load_tasks_jsonl(tasks_path)
+        assert tasks[0].tier2_command == "python -m pytest tests/foo.py::test_x -x"
+
+    async def test_per_instance_tier2_overrides_cli(self, tmp_path: Path):
+        """Row-level tier2_command must win over the global --test-command CLI arg."""
+        tasks = [
+            GenerationTask(
+                instance_id="swe-1",
+                task="Task A",
+                tier2_command="pytest instance_specific.py",
+            ),
+            GenerationTask(instance_id="swe-2", task="Task B"),
+        ]
+        mock_run = AsyncMock(return_value=0)
+        with patch("experiments.generate_trajectories.run_headless", mock_run):
+            await generate_trajectories(
+                tasks,
+                trajectory_jsonl=tmp_path / "traj.jsonl",
+                seeds=[0],
+                test_command="pytest global.py",
+            )
+
+        assert mock_run.await_count == 2
+        assert mock_run.await_args_list[0].kwargs["test_command"] == "pytest instance_specific.py"
+        assert mock_run.await_args_list[1].kwargs["test_command"] == "pytest global.py"
+
+    def test_resolve_tier2_substitutes_python_placeholder(self):
+        """Spaces in the python path must be shell-quoted."""
+        resolved = _resolve_tier2_command(
+            "{python} -m pytest foo.py", "C:/venv with space/python.exe"
+        )
+        assert resolved is not None
+        assert "{python}" not in resolved
+        assert "pytest foo.py" in resolved
+        assert "C:/venv with space/python.exe" in resolved
+        # Spaces require quoting on both platforms.
+        assert "'" in resolved or '"' in resolved
+
+    def test_resolve_tier2_no_quote_when_no_whitespace(self):
+        """Paths without whitespace must not be wrapped in quotes — cmd.exe
+        treats POSIX single quotes as literal characters, which breaks the
+        command on Windows."""
+        resolved = _resolve_tier2_command(
+            "{python} -m pytest foo.py", r"E:\venv\Scripts\python.exe"
+        )
+        assert resolved is not None
+        assert resolved.startswith(r"E:\venv\Scripts\python.exe -m pytest")
+        assert "'" not in resolved
+        assert '"' not in resolved
+
+    def test_resolve_tier2_passthrough_without_placeholder(self):
+        assert _resolve_tier2_command("pytest foo.py", "/x/py") == "pytest foo.py"
+        assert _resolve_tier2_command(None, "/x/py") is None
+        assert _resolve_tier2_command("", "/x/py") is None
 
     async def test_generate_counts_with_mixed_exit_codes(self, tmp_path: Path):
         tasks = [

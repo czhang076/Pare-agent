@@ -11,12 +11,44 @@ import asyncio
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
+import shlex
 import sys
 
 if __package__ in (None, ""):
     sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from pare.cli.headless import run_headless
+
+
+def _quote_for_shell(path: str) -> str:
+    """Quote an argument for `subprocess.run(..., shell=True)`.
+
+    On Windows the shell is cmd.exe, which does not honor POSIX single
+    quotes — it uses double quotes. On Unix we defer to shlex. We only
+    add quotes when the path contains whitespace; pytest/python paths
+    without spaces work raw on both shells and avoid GBK-mangling when
+    subprocess echoes the command back.
+    """
+    if not any(ch.isspace() for ch in path):
+        return path
+    if sys.platform == "win32":
+        escaped = path.replace('"', r"\"")
+        return f'"{escaped}"'
+    return shlex.quote(path)
+
+
+def _resolve_tier2_command(template: str | None, python_bin: str) -> str | None:
+    """Substitute the `{python}` placeholder in a tier2 command template.
+
+    Returns None when template is None or empty. The python binary is
+    shell-quoted in a platform-appropriate way so venv paths (with
+    spaces or backslashes) work under both cmd.exe and /bin/sh.
+    """
+    if not template:
+        return None
+    if "{python}" not in template:
+        return template
+    return template.replace("{python}", _quote_for_shell(python_bin))
 
 
 class GenerationError(ValueError):
@@ -28,6 +60,7 @@ class GenerationTask:
     instance_id: str
     task: str
     cwd: str | None = None
+    tier2_command: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,7 +88,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--tasks-jsonl", required=True, help="Input tasks JSONL path.")
     parser.add_argument("--trajectory-jsonl", required=True, help="Output trajectory JSONL path.")
-    parser.add_argument("--provider", default="openai", choices=["openai", "minimax", "openrouter"])
+    parser.add_argument(
+        "--provider", default="openai",
+        choices=["openai", "minimax", "openrouter", "glm"],
+    )
     parser.add_argument("--model", default=None)
     parser.add_argument("--api-key", default=None)
     parser.add_argument("--base-url", default=None)
@@ -131,6 +167,7 @@ def load_tasks_jsonl(path: Path) -> list[GenerationTask]:
             instance_id = payload.get("instance_id")
             task = payload.get("task")
             cwd = payload.get("cwd")
+            tier2_command = payload.get("tier2_command")
 
             if not isinstance(instance_id, str) or not instance_id.strip():
                 raise GenerationError(f"{path}:{line_no}: instance_id must be non-empty str")
@@ -138,12 +175,19 @@ def load_tasks_jsonl(path: Path) -> list[GenerationTask]:
                 raise GenerationError(f"{path}:{line_no}: task must be non-empty str")
             if cwd is not None and (not isinstance(cwd, str) or not cwd.strip()):
                 raise GenerationError(f"{path}:{line_no}: cwd must be non-empty str when provided")
+            if tier2_command is not None and (
+                not isinstance(tier2_command, str) or not tier2_command.strip()
+            ):
+                raise GenerationError(
+                    f"{path}:{line_no}: tier2_command must be non-empty str when provided"
+                )
 
             tasks.append(
                 GenerationTask(
                     instance_id=instance_id,
                     task=task,
                     cwd=cwd,
+                    tier2_command=tier2_command,
                 )
             )
 
@@ -184,6 +228,8 @@ async def generate_trajectories(
 
     for task in selected_tasks:
         run_cwd = Path(task.cwd).resolve() if task.cwd else default_cwd
+        raw_test_command = task.tier2_command or test_command
+        run_test_command = _resolve_tier2_command(raw_test_command, sys.executable)
 
         for seed in run_seeds:
             exit_code = await run_headless(
@@ -197,7 +243,7 @@ async def generate_trajectories(
                 trajectory_path=trajectory_jsonl,
                 instance_id=task.instance_id,
                 seed=seed,
-                test_command=test_command,
+                test_command=run_test_command,
                 test_timeout=test_timeout,
                 use_planning=use_planning,
                 max_tool_calls=max_tool_calls,
