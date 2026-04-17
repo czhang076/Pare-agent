@@ -309,26 +309,23 @@ class Agent:
             context = ToolContext(cwd=self.cwd, headless=self.headless)
             self._guardrails.reset_step()
 
-            # Budget policy: the planner's per-step `step.budget` is the
-            # *soft* effort target (surfaced to the LLM via step_prompt
-            # above). The *hard* executor cap floors the budget at 6 so
-            # tool-error recovery still has slack, and ceilings at the
-            # global per-step guardrail. Without the floor, a tight planner
-            # budget (e.g. 3) hard-stops mid-recovery with
-            # `budget_exhausted` → `plan_failed`, even when the LLM was on
-            # track — which conflates planner effort signals with terminal
-            # failure and distorts Module A recovery measurements.
-            effective_budget = min(
-                max(step.budget, 6),
-                self._guardrails.config.max_tool_calls_per_step,
-            )
-
+            # Budget policy: `step.budget` is a *soft* effort target,
+            # surfaced to the LLM via step_prompt only. The executor does
+            # NOT use it as a hard cap — that would let the planner's own
+            # optimistic estimate kill its own in-progress execution
+            # (observed repeatedly in pilot20 v1 and sympy20 v1 smokes:
+            # planner sets budget=3-5 for "find the class", LLM does 6+
+            # cautious reads, step_failed=budget_exhausted → plan_failed,
+            # tier2 never runs). The real hard protection is the
+            # per-step guardrail ceiling (`max_tool_calls_per_step`) which
+            # still fires via `Guardrails.check_before_tool_call`, plus
+            # the global `max_tool_calls` cap across the whole task.
             executor = ReActExecutor(
                 llm=self.llm,
                 registry=self.registry,
                 guardrails=self._guardrails,
                 event_log=self.event_log,
-                max_iterations=effective_budget,
+                max_iterations=self._guardrails.config.max_tool_calls_per_step,
             )
 
             result = await executor.run(

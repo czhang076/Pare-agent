@@ -316,12 +316,11 @@ class TestHybridMode:
 
     @pytest.mark.asyncio
     async def test_hybrid_stops_on_budget_exceeded_no_replan(self, tmp_path: Path):
-        """When a step exceeds the effective executor budget, execution stops
-        with plan_failed. The effective cap is
-        `min(max(step.budget, 6), guardrails.max_tool_calls_per_step)`, so we
-        force exhaustion by tightening the per-step guardrail ceiling."""
+        """Per-step guardrail ceiling is the only hard executor cap.
+        Forcing `GuardrailConfig(max_tool_calls_per_step=1)` stops the step
+        after one tool call with plan_failed (no replan)."""
         llm = MockAgentLLM([
-            _plan_response("Tight budget", [
+            _plan_response("Tight guardrail", [
                 {"step_number": 1, "goal": "Do task", "budget": 1},
                 {"step_number": 2, "goal": "Verify", "budget": 5},
             ]),
@@ -341,21 +340,32 @@ class TestHybridMode:
         assert result.stop_reason == "plan_failed"
 
     @pytest.mark.asyncio
-    async def test_hybrid_tight_planner_budget_gets_recovery_slack(self, tmp_path: Path):
-        """Regression: a tight planner budget (e.g. 3) must NOT hard-cap the
-        executor at 3 iterations. Orchestrator floors the effective cap at 6
-        so tool-error recovery has slack. Without this, an LLM that recovers
-        from a failed tool call on iter 2 can't finish on iter 4.
+    async def test_hybrid_tight_planner_budget_does_not_hard_cap_step(self, tmp_path: Path):
+        """Regression: `step.budget` is advisory — it must NOT be used as
+        the executor's hard `max_iterations`. A tight planner estimate
+        (budget=3) should not kill a step mid-execution when the guardrail
+        ceiling allows more. Previously (Phase 3.4 floor-at-6 fix) we
+        raised the effective cap to 6; now (Phase 3.6 fix) the cap is
+        purely the guardrail ceiling and step.budget is a prompt signal
+        only. This test verifies a step with budget=3 can use 10 tool
+        calls when the guardrail allows 15.
         """
         llm = MockAgentLLM([
-            _plan_response("Slack needed", [
+            _plan_response("Advisory only", [
                 {"step_number": 1, "goal": "Do task", "budget": 3},
             ]),
-            # 5 turns of work — would fail if cap were 3, succeeds at floor 6.
+            # 11 LLM turns (10 tool calls + final text) — would fail at any
+            # cap < 11. Default per-step guardrail is 15.
             _tool_call_response("echo", {"text": "1"}),
             _tool_call_response("echo", {"text": "2"}),
             _tool_call_response("echo", {"text": "3"}),
             _tool_call_response("echo", {"text": "4"}),
+            _tool_call_response("echo", {"text": "5"}),
+            _tool_call_response("echo", {"text": "6"}),
+            _tool_call_response("echo", {"text": "7"}),
+            _tool_call_response("echo", {"text": "8"}),
+            _tool_call_response("echo", {"text": "9"}),
+            _tool_call_response("echo", {"text": "10"}),
             _text_response("Done."),
         ])
         config = AgentConfig(git_checkpoint=False, use_planning=True)
@@ -365,7 +375,36 @@ class TestHybridMode:
 
         assert result.success is True
         assert result.stop_reason == "plan_complete"
-        assert result.tool_call_count == 4
+        assert result.tool_call_count == 10
+
+    @pytest.mark.asyncio
+    async def test_step_budget_surfaces_in_prompt_only(self, tmp_path: Path):
+        """`step.budget` flows into the user_message as `Expected effort:`
+        text. It must NOT affect how many iterations the executor runs."""
+        captured_user_messages: list[str] = []
+
+        class CapturingLLM(MockAgentLLM):
+            async def chat(self, messages, tools=None, **kwargs):
+                # Capture the most recent user message content
+                for m in messages:
+                    if getattr(m, "role", None) == "user":
+                        captured_user_messages.append(m.content)
+                return await super().chat(messages, tools, **kwargs)
+
+        llm = CapturingLLM([
+            _plan_response("Signal test", [
+                {"step_number": 1, "goal": "Do task", "budget": 7},
+            ]),
+            _text_response("Done."),
+        ])
+        config = AgentConfig(git_checkpoint=False, use_planning=True)
+        agent = Agent(llm=llm, cwd=tmp_path, registry=_make_registry(), config=config)
+
+        await agent.run("Task")
+
+        step_prompts = [m for m in captured_user_messages if "## Current Step" in m]
+        assert step_prompts, "step prompt not captured"
+        assert "Expected effort: ~7 tool calls" in step_prompts[0]
 
     @pytest.mark.asyncio
     async def test_hybrid_fallback_plan_on_invalid_json(self, tmp_path: Path):
