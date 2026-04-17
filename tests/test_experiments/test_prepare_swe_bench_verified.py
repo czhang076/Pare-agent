@@ -151,6 +151,37 @@ class TestPrepareSweBenchVerified:
         assert "-k" in cmd
         assert "test_foo or test_bar" in cmd
 
+    def test_tier2_command_handles_django_unittest_form(self, tmp_path: Path):
+        """Django FAIL_TO_PASS `test_x (dotted.module.Class)` → pytest node ids."""
+        records = [
+            {
+                "instance_id": "django-1",
+                "repo": "django/django",
+                "base_commit": "abc",
+                "problem_statement": "p",
+                "FAIL_TO_PASS": json.dumps([
+                    "test_skip_checks (user_commands.tests.CommandRunTests)",
+                    "test_other (admin_filters.tests.ListFiltersTests)",
+                ]),
+            }
+        ]
+        output = tmp_path / "tasks.jsonl"
+        prepare_tasks_jsonl(
+            records,
+            output_jsonl=output,
+            sample_size=1,
+            seed=0,
+            repos_root=tmp_path / "repos",
+        )
+        row = json.loads(output.read_text(encoding="utf-8").strip())
+        cmd = row["tier2_command"]
+        assert "user_commands/tests.py::CommandRunTests::test_skip_checks" in cmd
+        assert "admin_filters/tests.py::ListFiltersTests::test_other" in cmd
+        # Node-id branch: must not use the -k filter path.
+        assert " -k " not in cmd
+        # Parentheses from the original form must be gone (they break cmd.exe).
+        assert "(" not in cmd and ")" not in cmd
+
     def test_prepare_parses_list_fail_to_pass(self, tmp_path: Path):
         """Some dataset mirrors store FAIL_TO_PASS as an already-decoded list."""
         records = [

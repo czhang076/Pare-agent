@@ -89,6 +89,7 @@ def _build_trajectory_record(
     created_at: float,
     elapsed_seconds: float,
     result: ExecutionResult,
+    final_diff: str = "",
 ) -> TrajectoryRecord:
     attempts: list[StepAttempt] = []
     for raw in result.attempts:
@@ -124,6 +125,8 @@ def _build_trajectory_record(
         metadata["tier2_error"] = result.tier2_error
     if result.tier2_output:
         metadata["tier2_output"] = result.tier2_output
+    if final_diff:
+        metadata["final_diff"] = final_diff
 
     return TrajectoryRecord(
         schema_version=SCHEMA_VERSION,
@@ -262,6 +265,19 @@ async def run_headless(
     elapsed = time.time() - start
     created_at = time.time()
 
+    # Capture the full diff against the checkpoint's original branch BEFORE
+    # finalize squash-merges it away. The diff is the ground truth for
+    # trajectory-level "what did the agent actually change," used by the
+    # B1.1 (incomplete fix) classifier. Synthesizing from file_edit tool
+    # result_content is unreliable — those results are confirmation
+    # strings, not unified diffs.
+    final_diff = ""
+    if agent.checkpoint is not None and agent.checkpoint.is_active:
+        try:
+            final_diff = await agent.checkpoint.get_full_diff()
+        except Exception as e:
+            print(f"[warn] could not capture final_diff: {e}", file=sys.stderr)
+
     trajectory_record: TrajectoryRecord | None = None
     if trajectory_path:
         try:
@@ -274,6 +290,7 @@ async def run_headless(
                 created_at=created_at,
                 elapsed_seconds=elapsed,
                 result=result,
+                final_diff=final_diff,
             )
             append_trajectory_jsonl(trajectory_path, trajectory_record)
             print(f"[trajectory] {trajectory_path}", file=sys.stderr)

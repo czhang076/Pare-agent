@@ -28,6 +28,7 @@ def _record(
     tier2_command: str = "",
     attempts: list[StepAttempt] | None = None,
     tool_call_events: list[ToolCallEvent] | None = None,
+    metadata: dict[str, str] | None = None,
 ) -> TrajectoryRecord:
     return TrajectoryRecord(
         schema_version=SCHEMA_VERSION,
@@ -47,7 +48,7 @@ def _record(
         attempts=attempts or [],
         tool_call_events=tool_call_events or [],
         token_usage=TokenUsageSummary(input_tokens=100, output_tokens=20),
-        metadata={},
+        metadata=metadata or {},
     )
 
 
@@ -129,6 +130,73 @@ class TestClassifyOne:
         result = classify_one(rec)
         assert result.recovery.contains_recovery is True
         assert result.outcome.value == "verified_with_recovery"
+
+    def test_b11_uses_metadata_final_diff_over_file_edit_reconstruction(self):
+        """B1.1 must compare the gold_patch against the real unified diff stored in
+        metadata['final_diff'], not synthesize one from file_edit tool results.
+
+        Scenario: the agent fully matches the gold_patch (same file + same hunk
+        count). file_edit tool result_content is a confirmation string, which
+        would yield 0 hunks under the old reconstruction path and wrongly flag
+        B1.1=True. The real diff in metadata should override that.
+        """
+        gold = (
+            "diff --git a/a.py b/a.py\n"
+            "--- a/a.py\n"
+            "+++ b/a.py\n"
+            "@@ -1,1 +1,1 @@\n"
+            "-x = 1\n"
+            "+x = 2\n"
+        )
+        # Real diff matches gold exactly — B1.1 should be False.
+        real_diff = gold
+        events = [
+            _evt(0, 0, "file_edit", ok=True, content="Edited a.py: 1 line changed"),
+        ]
+        rec = _record(
+            "b11-real",
+            llm_claimed_success=True,
+            final_passed=True,
+            tier1_pass=True,
+            tier2_pass=True,
+            tier2_command="pytest tests/",
+            tool_call_events=events,
+            metadata={"final_diff": real_diff},
+        )
+        result = classify_one(rec, gold_patch=gold)
+        assert result.liu.b11_incomplete_fix is False
+
+    def test_b11_skipped_when_no_final_diff_in_metadata(self):
+        """Legacy records without metadata['final_diff'] must not reconstruct
+        from file_edit results (that would always yield a degenerate 0-hunk
+        diff and wrongly fire B1.1 for every non-empty gold_patch)."""
+        gold = (
+            "diff --git a/a.py b/a.py\n"
+            "--- a/a.py\n"
+            "+++ b/a.py\n"
+            "@@ -1,1 +1,1 @@\n"
+            "-x = 1\n"
+            "+x = 2\n"
+        )
+        events = [
+            _evt(0, 0, "file_edit", ok=True, content="Edited a.py: 1 line changed"),
+        ]
+        rec = _record(
+            "b11-legacy",
+            llm_claimed_success=True,
+            final_passed=False,
+            tier1_pass=True,
+            tier2_pass=False,
+            tier2_command="pytest tests/",
+            tool_call_events=events,
+            metadata={},
+        )
+        # With empty final_diff and non-empty gold, detect_b11_incomplete_fix
+        # returns True (documented behaviour: "no fix at all"). That's fine —
+        # it's a principled signal based on the absence of a real diff, not a
+        # false positive driven by misreconstruction.
+        result = classify_one(rec, gold_patch=gold)
+        assert result.liu.b11_incomplete_fix is True
 
     def test_no_events_backward_compat(self):
         """v1 trajectory with 0 events classifies without error."""

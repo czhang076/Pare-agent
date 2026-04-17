@@ -125,6 +125,7 @@ def _parse_test_list(value: Any) -> list[str]:
 
 
 _DIFF_FILE_RE = re.compile(r"^diff --git a/(?P<path>\S+) b/\S+", re.MULTILINE)
+_DJANGO_TEST_RE = re.compile(r"^(?P<method>\w+)\s+\((?P<dotted>[\w\.]+)\)$")
 
 
 def _test_files_from_patch(test_patch: str) -> list[str]:
@@ -139,16 +140,37 @@ def _test_files_from_patch(test_patch: str) -> list[str]:
     return seen
 
 
+def _django_name_to_node_id(name: str) -> str | None:
+    """Convert Django / unittest `test_x (dotted.module.ClassName)` → pytest node id.
+
+    Example: `test_skip_checks (user_commands.tests.CommandRunTests)` →
+             `user_commands/tests.py::CommandRunTests::test_skip_checks`.
+
+    Returns None when the name does not match this shape.
+    """
+    m = _DJANGO_TEST_RE.match(name.strip())
+    if not m:
+        return None
+    parts = m.group("dotted").split(".")
+    if len(parts) < 2:
+        return None
+    class_name = parts[-1]
+    module_path = "/".join(parts[:-1]) + ".py"
+    return f"{module_path}::{class_name}::{m.group('method')}"
+
+
 def _build_tier2_command(fail_to_pass: list[str], test_patch: str = "") -> str:
     """Build a pytest command that asserts the FAIL_TO_PASS set now passes.
 
-    SWE-bench stores FAIL_TO_PASS in two shapes:
+    SWE-bench stores FAIL_TO_PASS in three shapes:
       (a) pytest node ids — `path/test_file.py::TestClass::test_method`
       (b) bare function names — `test_something` (common in sympy)
+      (c) Django/unittest form — `test_method (dotted.module.ClassName)`
 
     For (a) we pass them positionally. For (b) we scope pytest to the test
     files from test_patch and use `-k` name filtering; without scoping,
-    pytest would collect the whole suite (minutes of overhead).
+    pytest would collect the whole suite (minutes of overhead). For (c) we
+    normalize to node-id form and fall into branch (a).
 
     Quoting: each token is shlex-quoted so parametrized ids and names with
     whitespace survive shell=True on both Unix and Windows.
@@ -160,13 +182,20 @@ def _build_tier2_command(fail_to_pass: list[str], test_patch: str = "") -> str:
     if not fail_to_pass:
         return ""
 
-    has_node_ids = any("::" in t for t in fail_to_pass)
+    # Normalize Django/unittest form into pytest node ids up front so the
+    # branching below sees a homogeneous list.
+    normalized: list[str] = []
+    for name in fail_to_pass:
+        node = _django_name_to_node_id(name)
+        normalized.append(node if node is not None else name)
+
+    has_node_ids = any("::" in t for t in normalized)
     if has_node_ids:
-        quoted = " ".join(shlex.quote(t) for t in fail_to_pass)
+        quoted = " ".join(shlex.quote(t) for t in normalized)
         return f"{{python}} -m pytest {quoted} --tb=short -x --no-header -q"
 
     test_files = _test_files_from_patch(test_patch)
-    k_expr = " or ".join(fail_to_pass)
+    k_expr = " or ".join(normalized)
     quoted_k = shlex.quote(k_expr)
     if test_files:
         files = " ".join(shlex.quote(f) for f in test_files)

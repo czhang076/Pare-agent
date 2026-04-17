@@ -101,6 +101,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--test-command", default=None)
     parser.add_argument("--test-timeout", type=int, default=300)
     parser.add_argument(
+        "--tier2-python",
+        default=None,
+        help=(
+            "Python interpreter substituted for the `{python}` placeholder "
+            "in tier2_command. Defaults to sys.executable. Override this "
+            "when the calling shell's `python` is not the venv, so tier2 "
+            "does not silently fall back to a global interpreter without "
+            "the repo's dependencies."
+        ),
+    )
+    parser.add_argument(
         "--use-planning",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -209,6 +220,7 @@ async def generate_trajectories(
     max_instances: int | None = None,
     test_command: str | None = None,
     test_timeout: int = 300,
+    tier2_python: str | None = None,
     use_planning: bool = True,
     max_tool_calls: int = 40,
     max_tool_calls_per_step: int = 8,
@@ -219,6 +231,7 @@ async def generate_trajectories(
 
     run_seeds = seeds or [0]
     selected_tasks = tasks[:max_instances] if max_instances is not None else list(tasks)
+    python_bin = tier2_python or sys.executable
 
     runs_requested = len(selected_tasks) * len(run_seeds)
     runs_completed = 0
@@ -229,7 +242,7 @@ async def generate_trajectories(
     for task in selected_tasks:
         run_cwd = Path(task.cwd).resolve() if task.cwd else default_cwd
         raw_test_command = task.tier2_command or test_command
-        run_test_command = _resolve_tier2_command(raw_test_command, sys.executable)
+        run_test_command = _resolve_tier2_command(raw_test_command, python_bin)
 
         for seed in run_seeds:
             exit_code = await run_headless(
@@ -306,6 +319,7 @@ def main(argv: list[str] | None = None) -> int:
                 max_instances=args.max_instances,
                 test_command=args.test_command,
                 test_timeout=args.test_timeout,
+                tier2_python=args.tier2_python,
                 use_planning=args.use_planning,
                 max_tool_calls=args.max_tool_calls,
                 max_tool_calls_per_step=args.max_tool_calls_per_step,

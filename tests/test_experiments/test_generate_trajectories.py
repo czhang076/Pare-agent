@@ -62,6 +62,30 @@ class TestGenerateTrajectories:
         tasks = load_tasks_jsonl(tasks_path)
         assert tasks[0].tier2_command == "python -m pytest tests/foo.py::test_x -x"
 
+    async def test_tier2_python_cli_overrides_sys_executable(self, tmp_path: Path):
+        """`--tier2-python` must take precedence over sys.executable when substituting `{python}`."""
+        tasks = [
+            GenerationTask(
+                instance_id="swe-1",
+                task="Task A",
+                tier2_command="{python} -m pytest foo.py",
+            ),
+        ]
+        mock_run = AsyncMock(return_value=0)
+        fake_bin = "/opt/venv/bin/python"
+        with patch("experiments.generate_trajectories.run_headless", mock_run):
+            await generate_trajectories(
+                tasks,
+                trajectory_jsonl=tmp_path / "traj.jsonl",
+                seeds=[0],
+                tier2_python=fake_bin,
+            )
+
+        resolved = mock_run.await_args_list[0].kwargs["test_command"]
+        assert resolved is not None
+        assert fake_bin in resolved
+        assert "{python}" not in resolved
+
     async def test_per_instance_tier2_overrides_cli(self, tmp_path: Path):
         """Row-level tier2_command must win over the global --test-command CLI arg."""
         tasks = [

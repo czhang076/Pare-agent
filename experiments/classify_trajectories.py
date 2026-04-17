@@ -150,12 +150,17 @@ def classify_one(record: TrajectoryRecord, *, gold_patch: str = "") -> Trajector
     else:
         signals = []
 
-    # Final diff approximation: combine all successful file edits
-    final_diff_parts = []
-    for evt in events:
-        if evt.tool_name == "file_edit" and evt.result_success:
-            final_diff_parts.append(evt.result_content)
-    final_diff = "\n".join(final_diff_parts)
+    # Final diff: prefer the real unified diff captured at agent-finalize
+    # time from the git checkpoint (stored in metadata). This is the ground
+    # truth for "what did the agent actually change."
+    #
+    # Legacy records (pre-final_diff plumbing) don't have this field. For
+    # those we leave final_diff empty rather than fall back to concatenating
+    # file_edit tool result_content — those results are confirmation
+    # strings, not unified diffs, so they always yield 0 files/0 hunks and
+    # make detect_b11_incomplete_fix return True for every non-empty
+    # gold_patch, which is a degenerate signal (see pilot20 data).
+    final_diff = record.metadata.get("final_diff", "") if record.metadata else ""
 
     # Step 2: Liu et al. classification
     liu = classify_liu_from_record(
