@@ -152,7 +152,22 @@ class TestPrepareSweBenchVerified:
         assert "test_foo or test_bar" in cmd
 
     def test_tier2_command_handles_django_unittest_form(self, tmp_path: Path):
-        """Django FAIL_TO_PASS `test_x (dotted.module.Class)` → pytest node ids."""
+        """Django FAIL_TO_PASS `test_x (dotted.module.Class)` → pytest node ids.
+
+        When the test_patch reveals the real on-disk prefix
+        (e.g. `tests/user_commands/tests.py`), the node id must carry that
+        prefix — pytest runs from the repo root, not from `tests/`.
+        """
+        test_patch = (
+            "diff --git a/tests/user_commands/tests.py b/tests/user_commands/tests.py\n"
+            "--- a/tests/user_commands/tests.py\n"
+            "+++ b/tests/user_commands/tests.py\n"
+            "@@ -1,1 +1,1 @@\n-old\n+new\n"
+            "diff --git a/tests/admin_filters/tests.py b/tests/admin_filters/tests.py\n"
+            "--- a/tests/admin_filters/tests.py\n"
+            "+++ b/tests/admin_filters/tests.py\n"
+            "@@ -1,1 +1,1 @@\n-old\n+new\n"
+        )
         records = [
             {
                 "instance_id": "django-1",
@@ -163,6 +178,7 @@ class TestPrepareSweBenchVerified:
                     "test_skip_checks (user_commands.tests.CommandRunTests)",
                     "test_other (admin_filters.tests.ListFiltersTests)",
                 ]),
+                "test_patch": test_patch,
             }
         ]
         output = tmp_path / "tasks.jsonl"
@@ -175,12 +191,35 @@ class TestPrepareSweBenchVerified:
         )
         row = json.loads(output.read_text(encoding="utf-8").strip())
         cmd = row["tier2_command"]
-        assert "user_commands/tests.py::CommandRunTests::test_skip_checks" in cmd
-        assert "admin_filters/tests.py::ListFiltersTests::test_other" in cmd
+        assert "tests/user_commands/tests.py::CommandRunTests::test_skip_checks" in cmd
+        assert "tests/admin_filters/tests.py::ListFiltersTests::test_other" in cmd
         # Node-id branch: must not use the -k filter path.
         assert " -k " not in cmd
         # Parentheses from the original form must be gone (they break cmd.exe).
         assert "(" not in cmd and ")" not in cmd
+
+    def test_django_node_id_without_test_patch_falls_back_to_dotted_tail(self):
+        """With no test_patch context, `_django_name_to_node_id` uses the
+        dotted suffix as the file path. Callers must provide `test_files`
+        (from the patch) to get the real on-disk prefix."""
+        from experiments.prepare_swe_bench_verified import _django_name_to_node_id
+
+        node = _django_name_to_node_id(
+            "test_skip_checks (user_commands.tests.CommandRunTests)",
+            test_files=None,
+        )
+        assert node == "user_commands/tests.py::CommandRunTests::test_skip_checks"
+
+    def test_django_node_id_matches_suffix_even_with_other_prefix(self):
+        """Module `a.b.Class` whose file lives at `nested/a/b.py` should
+        pick up the prefix."""
+        from experiments.prepare_swe_bench_verified import _django_name_to_node_id
+
+        node = _django_name_to_node_id(
+            "test_x (a.b.MyTest)",
+            test_files=["nested/a/b.py"],
+        )
+        assert node == "nested/a/b.py::MyTest::test_x"
 
     def test_prepare_parses_list_fail_to_pass(self, tmp_path: Path):
         """Some dataset mirrors store FAIL_TO_PASS as an already-decoded list."""

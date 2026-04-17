@@ -109,6 +109,9 @@ def ensure_commit_available(repo_dir: Path, commit: str) -> None:
     _run_git(["git", "-C", str(repo_dir), "cat-file", "-e", f"{commit}^{{commit}}"])
 
 
+_BRANCH_NAME = "pare/base"
+
+
 def ensure_instance_workdir(
     *,
     repo_dir: Path,
@@ -117,11 +120,28 @@ def ensure_instance_workdir(
     workdirs_root: Path,
     overwrite: bool = False,
 ) -> Path:
+    """Create a git worktree checked out on a *named* branch at `commit`.
+
+    A named branch (not detached HEAD) is required for Pare's
+    GitCheckpoint: finalize uses `git diff <original_branch> HEAD` to
+    compute the agent's full diff, which is stored in
+    `metadata["final_diff"]` and used by B1.1 classification. With
+    detached HEAD, `rev-parse --abbrev-ref HEAD` returns the literal
+    string "HEAD", so the diff degenerates to `git diff HEAD HEAD` → "".
+    """
     instance_dir = workdirs_root / instance_id
     if overwrite:
         # Remove registered worktree first to avoid stale metadata conflicts.
         subprocess.run(
             ["git", "-C", str(repo_dir), "worktree", "remove", "--force", str(instance_dir)],
+            capture_output=True,
+            text=True,
+        )
+        # Also remove any leftover local branch from a prior materialization
+        # of this instance so `worktree add -b` doesn't fail with
+        # "already exists".
+        subprocess.run(
+            ["git", "-C", str(repo_dir), "branch", "-D", f"{_BRANCH_NAME}/{instance_id}"],
             capture_output=True,
             text=True,
         )
@@ -132,10 +152,11 @@ def ensure_instance_workdir(
         shutil.rmtree(instance_dir)
 
     instance_dir.parent.mkdir(parents=True, exist_ok=True)
+    branch_name = f"{_BRANCH_NAME}/{instance_id}"
     _run_git(
         [
             "git", "-C", str(repo_dir),
-            "worktree", "add", "--detach", str(instance_dir), commit,
+            "worktree", "add", "-b", branch_name, str(instance_dir), commit,
         ]
     )
     return instance_dir

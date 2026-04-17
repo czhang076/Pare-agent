@@ -140,11 +140,18 @@ def _test_files_from_patch(test_patch: str) -> list[str]:
     return seen
 
 
-def _django_name_to_node_id(name: str) -> str | None:
+def _django_name_to_node_id(name: str, test_files: list[str] | None = None) -> str | None:
     """Convert Django / unittest `test_x (dotted.module.ClassName)` → pytest node id.
 
     Example: `test_skip_checks (user_commands.tests.CommandRunTests)` →
              `user_commands/tests.py::CommandRunTests::test_skip_checks`.
+
+    Django's dotted path is relative to the `tests/` directory (where the
+    test runner places the import root), not the repo root. When pytest
+    runs from the repo root it needs the full path. If `test_files` (from
+    `_test_files_from_patch`) contains a candidate whose tail matches the
+    dotted module's file path, use that candidate — this preserves the
+    real on-disk prefix (e.g. `tests/user_commands/tests.py`).
 
     Returns None when the name does not match this shape.
     """
@@ -155,7 +162,16 @@ def _django_name_to_node_id(name: str) -> str | None:
     if len(parts) < 2:
         return None
     class_name = parts[-1]
-    module_path = "/".join(parts[:-1]) + ".py"
+    module_tail = "/".join(parts[:-1]) + ".py"
+
+    module_path = module_tail
+    if test_files:
+        for candidate in test_files:
+            candidate_norm = candidate.replace("\\", "/")
+            if candidate_norm == module_tail or candidate_norm.endswith("/" + module_tail):
+                module_path = candidate_norm
+                break
+
     return f"{module_path}::{class_name}::{m.group('method')}"
 
 
@@ -183,10 +199,13 @@ def _build_tier2_command(fail_to_pass: list[str], test_patch: str = "") -> str:
         return ""
 
     # Normalize Django/unittest form into pytest node ids up front so the
-    # branching below sees a homogeneous list.
+    # branching below sees a homogeneous list. Pass test_files from the
+    # patch so the node-id carries the real on-disk prefix
+    # (e.g. `tests/user_commands/tests.py`), not the dotted-path suffix.
+    test_files = _test_files_from_patch(test_patch)
     normalized: list[str] = []
     for name in fail_to_pass:
-        node = _django_name_to_node_id(name)
+        node = _django_name_to_node_id(name, test_files=test_files)
         normalized.append(node if node is not None else name)
 
     has_node_ids = any("::" in t for t in normalized)
@@ -194,7 +213,6 @@ def _build_tier2_command(fail_to_pass: list[str], test_patch: str = "") -> str:
         quoted = " ".join(shlex.quote(t) for t in normalized)
         return f"{{python}} -m pytest {quoted} --tb=short -x --no-header -q"
 
-    test_files = _test_files_from_patch(test_patch)
     k_expr = " or ".join(normalized)
     quoted_k = shlex.quote(k_expr)
     if test_files:
