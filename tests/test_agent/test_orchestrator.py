@@ -14,6 +14,7 @@ from unittest.mock import patch
 import pytest
 
 from pare.agent.executor import ExecutionResult
+from pare.agent.guardrails import GuardrailConfig
 from pare.agent.orchestrator import Agent, AgentConfig
 from pare.agent.verify import Tier2CheckResult
 from pare.llm.base import (
@@ -315,23 +316,56 @@ class TestHybridMode:
 
     @pytest.mark.asyncio
     async def test_hybrid_stops_on_budget_exceeded_no_replan(self, tmp_path: Path):
-        """When a step exceeds budget, execution stops with plan_failed."""
+        """When a step exceeds the effective executor budget, execution stops
+        with plan_failed. The effective cap is
+        `min(max(step.budget, 6), guardrails.max_tool_calls_per_step)`, so we
+        force exhaustion by tightening the per-step guardrail ceiling."""
         llm = MockAgentLLM([
-            # Step 1 has budget=1 and will be exhausted after one tool call.
             _plan_response("Tight budget", [
                 {"step_number": 1, "goal": "Do task", "budget": 1},
                 {"step_number": 2, "goal": "Verify", "budget": 5},
             ]),
-            # Step 1 execution
+            # Only one tool-call response; executor will exhaust after 1 iter.
             _tool_call_response("echo", {"text": "attempt"}),
         ])
-        config = AgentConfig(git_checkpoint=False, use_planning=True)
+        config = AgentConfig(
+            git_checkpoint=False,
+            use_planning=True,
+            guardrail_config=GuardrailConfig(max_tool_calls_per_step=1),
+        )
         agent = Agent(llm=llm, cwd=tmp_path, registry=_make_registry(), config=config)
 
         result = await agent.run("Do something")
 
         assert result.success is False
         assert result.stop_reason == "plan_failed"
+
+    @pytest.mark.asyncio
+    async def test_hybrid_tight_planner_budget_gets_recovery_slack(self, tmp_path: Path):
+        """Regression: a tight planner budget (e.g. 3) must NOT hard-cap the
+        executor at 3 iterations. Orchestrator floors the effective cap at 6
+        so tool-error recovery has slack. Without this, an LLM that recovers
+        from a failed tool call on iter 2 can't finish on iter 4.
+        """
+        llm = MockAgentLLM([
+            _plan_response("Slack needed", [
+                {"step_number": 1, "goal": "Do task", "budget": 3},
+            ]),
+            # 5 turns of work — would fail if cap were 3, succeeds at floor 6.
+            _tool_call_response("echo", {"text": "1"}),
+            _tool_call_response("echo", {"text": "2"}),
+            _tool_call_response("echo", {"text": "3"}),
+            _tool_call_response("echo", {"text": "4"}),
+            _text_response("Done."),
+        ])
+        config = AgentConfig(git_checkpoint=False, use_planning=True)
+        agent = Agent(llm=llm, cwd=tmp_path, registry=_make_registry(), config=config)
+
+        result = await agent.run("Do something")
+
+        assert result.success is True
+        assert result.stop_reason == "plan_complete"
+        assert result.tool_call_count == 4
 
     @pytest.mark.asyncio
     async def test_hybrid_fallback_plan_on_invalid_json(self, tmp_path: Path):

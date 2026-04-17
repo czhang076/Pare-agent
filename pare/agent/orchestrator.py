@@ -294,6 +294,7 @@ class Agent:
                 f"## Current Plan\n{plan.to_markdown()}\n\n"
                 f"## Current Step\n"
                 f"Step {step.step_number}: {step.goal}\n"
+                f"Expected effort: ~{step.budget} tool calls\n"
             )
             if step.success_criteria:
                 step_prompt += f"Success criteria: {step.success_criteria}\n"
@@ -308,12 +309,26 @@ class Agent:
             context = ToolContext(cwd=self.cwd, headless=self.headless)
             self._guardrails.reset_step()
 
+            # Budget policy: the planner's per-step `step.budget` is the
+            # *soft* effort target (surfaced to the LLM via step_prompt
+            # above). The *hard* executor cap floors the budget at 6 so
+            # tool-error recovery still has slack, and ceilings at the
+            # global per-step guardrail. Without the floor, a tight planner
+            # budget (e.g. 3) hard-stops mid-recovery with
+            # `budget_exhausted` → `plan_failed`, even when the LLM was on
+            # track — which conflates planner effort signals with terminal
+            # failure and distorts Module A recovery measurements.
+            effective_budget = min(
+                max(step.budget, 6),
+                self._guardrails.config.max_tool_calls_per_step,
+            )
+
             executor = ReActExecutor(
                 llm=self.llm,
                 registry=self.registry,
                 guardrails=self._guardrails,
                 event_log=self.event_log,
-                max_iterations=step.budget,
+                max_iterations=effective_budget,
             )
 
             result = await executor.run(
