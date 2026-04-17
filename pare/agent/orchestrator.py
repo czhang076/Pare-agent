@@ -391,6 +391,32 @@ class Agent:
                           tool_calls=result.tool_call_count)
                 break
 
+        # Finalize-time tier2: if tier2 was never invoked by a successful
+        # step (e.g., step 1 exhausted its budget and the loop broke early),
+        # run it once against the current code state. This decouples
+        # "agent claimed done" (plan_complete, subjective) from
+        # "agent's final_diff passes gold tests" (tier2_pass, objective).
+        # Without this, any plan_failed outcome silently leaves tier2_pass=False
+        # with no command executed — conflating "agent didn't finish" with
+        # "code doesn't work" in the research data.
+        #
+        # The finalize check is a *measurement*, not a control-flow gate:
+        # it does NOT set `tier2_failed` (which drives stop_reason), so a
+        # plan_failed run with a finalize-tier2 pass still reports
+        # stop_reason="plan_failed" — both signals are preserved
+        # independently for classifier consumers.
+        if not tier2.enabled and self.config.tier2_test_command:
+            tier2 = self._run_tier2_verification()
+            if tier2.enabled:
+                self._log(
+                    "verify",
+                    check="tier2",
+                    phase="finalize",
+                    command=tier2.command,
+                    passed=tier2.passed,
+                    return_code=tier2.return_code,
+                )
+
         # Build final result
         success = plan.is_complete and not tier2_failed
         final_text = ""
@@ -423,7 +449,11 @@ class Agent:
             total_usage=total_usage,
             tier1_pass=tier1_pass,
             tier2_enabled=tier2.enabled,
-            tier2_pass=tier2.enabled and tier2.passed and success,
+            # tier2_pass reflects the code state alone, independent of
+            # whether the agent declared plan-complete. A plan_failed run
+            # whose partial final_diff happens to pass gold tests will
+            # report tier2_pass=True — meaningful research signal.
+            tier2_pass=tier2.enabled and tier2.passed,
             tier2_command=tier2.command,
             tier2_output=tier2.output,
             tier2_return_code=tier2.return_code,

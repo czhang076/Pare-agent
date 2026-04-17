@@ -126,8 +126,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-tool-calls-per-step",
         type=int,
-        default=8,
-        help="Per-step tool-call budget (default: 8).",
+        default=12,
+        help="Per-step tool-call budget (default: 12).",
     )
     parser.add_argument("--report-json", default=None, help="Optional report JSON output path.")
     parser.add_argument(
@@ -223,7 +223,7 @@ async def generate_trajectories(
     tier2_python: str | None = None,
     use_planning: bool = True,
     max_tool_calls: int = 40,
-    max_tool_calls_per_step: int = 8,
+    max_tool_calls_per_step: int = 12,
     stop_on_setup_error: bool = False,
 ) -> GenerationReport:
     if not tasks:

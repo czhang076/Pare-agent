@@ -32,7 +32,7 @@ class TestGenerateTrajectories:
         ])
         assert args.use_planning is True
         assert args.max_tool_calls == 40
-        assert args.max_tool_calls_per_step == 8
+        assert args.max_tool_calls_per_step == 12
 
     def test_parse_seed_list(self):
         assert parse_seed_list("0,1,2") == [0, 1, 2]
@@ -161,7 +161,7 @@ class TestGenerateTrajectories:
         kwargs = mock_run.await_args_list[0].kwargs
         assert kwargs["use_planning"] is True
         assert kwargs["max_tool_calls"] == 40
-        assert kwargs["max_tool_calls_per_step"] == 8
+        assert kwargs["max_tool_calls_per_step"] == 12
 
     async def test_stop_on_setup_error(self, tmp_path: Path):
         tasks = [

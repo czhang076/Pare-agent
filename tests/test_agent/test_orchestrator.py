@@ -407,6 +407,91 @@ class TestHybridMode:
         assert "Expected effort: ~7 tool calls" in step_prompts[0]
 
     @pytest.mark.asyncio
+    async def test_hybrid_runs_tier2_on_plan_failed(self, tmp_path: Path):
+        """Finalize-time tier2: when a step hits the guardrail ceiling and the
+        plan fails, tier2 should still run once against the current code state
+        so `verification.tier2_pass` / `tier2_command` reflect whether the
+        agent's partial work passes the gold tests. This decouples subjective
+        plan_complete from objective tier2_pass for research data.
+        """
+        llm = MockAgentLLM([
+            _plan_response("Budget-exhausted step", [
+                {"step_number": 1, "goal": "Do task", "budget": 5},
+            ]),
+            # Only 1 tool call response — guardrail cap of 1 will exhaust the step.
+            _tool_call_response("echo", {"text": "attempt"}),
+        ])
+        config = AgentConfig(
+            git_checkpoint=False,
+            use_planning=True,
+            tier2_test_command="pytest -q",
+            guardrail_config=GuardrailConfig(max_tool_calls_per_step=1),
+        )
+        agent = Agent(llm=llm, cwd=tmp_path, registry=_make_registry(), config=config)
+
+        with patch(
+            "pare.agent.orchestrator.run_tier2_check",
+            return_value=Tier2CheckResult(
+                enabled=True,
+                command="pytest -q",
+                passed=True,
+                return_code=0,
+                output="ok",
+            ),
+        ) as mock_tier2:
+            result = await agent.run("Task")
+
+        # Step 1 budget-exhausted → plan_failed, but tier2 still ran at finalize.
+        assert result.success is False
+        assert result.stop_reason == "plan_failed"
+        assert result.tier2_enabled is True
+        # Code actually passes gold tests even though agent didn't declare done.
+        assert result.tier2_pass is True
+        assert result.tier2_command == "pytest -q"
+        # Called exactly once — at finalize, not in the loop (step didn't succeed).
+        assert mock_tier2.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_hybrid_finalize_tier2_failure_keeps_plan_failed_reason(self, tmp_path: Path):
+        """Finalize-time tier2 is a *measurement*, not a control-flow gate.
+        If the step already failed with plan_failed, a failing finalize-tier2
+        must NOT overwrite stop_reason to tier2_failed. The original failure
+        reason is preserved; tier2_pass just records the objective state.
+        """
+        llm = MockAgentLLM([
+            _plan_response("Budget-exhausted step", [
+                {"step_number": 1, "goal": "Do task", "budget": 5},
+            ]),
+            _tool_call_response("echo", {"text": "attempt"}),
+        ])
+        config = AgentConfig(
+            git_checkpoint=False,
+            use_planning=True,
+            tier2_test_command="pytest -q",
+            guardrail_config=GuardrailConfig(max_tool_calls_per_step=1),
+        )
+        agent = Agent(llm=llm, cwd=tmp_path, registry=_make_registry(), config=config)
+
+        with patch(
+            "pare.agent.orchestrator.run_tier2_check",
+            return_value=Tier2CheckResult(
+                enabled=True,
+                command="pytest -q",
+                passed=False,
+                return_code=1,
+                output="failed",
+            ),
+        ):
+            result = await agent.run("Task")
+
+        assert result.success is False
+        # Reason stays plan_failed — finalize-tier2 is measurement only.
+        assert result.stop_reason == "plan_failed"
+        assert result.tier2_enabled is True
+        assert result.tier2_pass is False
+        assert result.tier2_command == "pytest -q"
+
+    @pytest.mark.asyncio
     async def test_hybrid_fallback_plan_on_invalid_json(self, tmp_path: Path):
         """If planner can't parse JSON, fallback single-step plan still works."""
         llm = MockAgentLLM([
