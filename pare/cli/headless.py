@@ -281,13 +281,23 @@ async def run_headless(
     # when the tree is clean (see GitCheckpoint.checkpoint) and captures
     # the agent's real edits when it isn't.
     final_diff = ""
-    if agent.checkpoint is not None and agent.checkpoint.is_active:
+    cp = agent.checkpoint
+    print(
+        f"[diag] checkpoint_present={cp is not None} "
+        f"is_active={cp.is_active if cp is not None else 'n/a'} "
+        f"original_branch={cp.original_branch if cp is not None else 'n/a'} "
+        f"working_branch={cp.working_branch if cp is not None else 'n/a'}",
+        file=sys.stderr,
+    )
+    if cp is not None and cp.is_active:
         try:
-            await agent.checkpoint.checkpoint("finalize: capture agent state")
+            sha = await cp.checkpoint("finalize: capture agent state")
+            print(f"[diag] finalize checkpoint sha={sha}", file=sys.stderr)
         except Exception as e:
             print(f"[warn] could not checkpoint before diff: {e}", file=sys.stderr)
         try:
-            final_diff = await agent.checkpoint.get_full_diff()
+            final_diff = await cp.get_full_diff()
+            print(f"[diag] get_full_diff returned {len(final_diff)} bytes", file=sys.stderr)
         except Exception as e:
             print(f"[warn] could not capture final_diff: {e}", file=sys.stderr)
 
