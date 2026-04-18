@@ -22,11 +22,13 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Callable
 from uuid import uuid4
 
 from pare.agent.executor import ExecutionResult
 from pare.agent.guardrails import GuardrailConfig
 from pare.agent.orchestrator import Agent, AgentConfig
+from pare.agent.verify import Tier2CheckResult
 from pare.llm import create_llm
 from pare.telemetry import EventLog
 from pare.trajectory.schema import (
@@ -166,6 +168,8 @@ async def run_headless(
     use_planning: bool = False,
     max_tool_calls: int = 100,
     max_tool_calls_per_step: int = 15,
+    tier2_mode: str = "host",
+    tier2_verifier: Callable[[str, str], Tier2CheckResult] | None = None,
     verbose: bool = False,
 ) -> int:
     """Run a task in headless mode. Returns exit code (0=success).
@@ -181,11 +185,16 @@ async def run_headless(
         trajectory_path: Path to append trajectory JSONL (optional).
         instance_id: Dataset/sample instance identifier.
         seed: Run seed for trajectory metadata.
-        test_command: Optional Tier-2 verification command.
+        test_command: Optional Tier-2 verification command (host mode only).
         test_timeout: Timeout for Tier-2 verification command.
         use_planning: Whether to use Orient -> Plan -> Execute mode.
         max_tool_calls: Total tool-call budget for one task.
         max_tool_calls_per_step: Tool-call budget per step.
+        tier2_mode: "host" (default) runs test_command inline via subprocess;
+            "docker" disables in-agent tier2 and delegates verification to
+            tier2_verifier after final_diff capture; "off" skips tier2 entirely.
+        tier2_verifier: Callable (instance_id, final_diff) -> Tier2CheckResult.
+            Required when tier2_mode == "docker".
         verbose: Enable debug logging.
 
     Returns:
@@ -223,10 +232,14 @@ async def run_headless(
         max_tool_calls=max_tool_calls,
         max_tool_calls_per_step=max_tool_calls_per_step,
     )
+    # Disable in-agent host tier2 whenever docker/off is requested — the
+    # subprocess-based checker in pare.agent.verify assumes host pytest can
+    # import the repo, which is the whole reason we're moving to docker.
+    agent_tier2_command = test_command if tier2_mode == "host" else None
     agent_config = AgentConfig(
         guardrail_config=guardrail_config,
         use_planning=use_planning,
-        tier2_test_command=test_command,
+        tier2_test_command=agent_tier2_command,
         tier2_timeout_seconds=test_timeout,
     )
 
@@ -307,6 +320,32 @@ async def run_headless(
             final_diff = await cp.get_full_diff()
         except Exception as e:
             print(f"[warn] could not capture final_diff: {e}", file=sys.stderr)
+
+    # Docker tier2 seam — runs AFTER final_diff is captured so the diff
+    # handed to the harness matches exactly what the trajectory records.
+    # The verifier returns a Tier2CheckResult shaped identically to the
+    # host subprocess checker, so _build_trajectory_record below needs no
+    # knowledge of which backend produced the verdict.
+    if tier2_mode == "docker":
+        if tier2_verifier is None:
+            print(
+                "[warn] tier2_mode=docker but no tier2_verifier provided; "
+                "skipping docker verification.",
+                file=sys.stderr,
+            )
+        else:
+            docker_result = tier2_verifier(instance_id, final_diff)
+            result.tier2_enabled = True
+            result.tier2_pass = docker_result.passed
+            result.tier2_command = docker_result.command
+            result.tier2_return_code = docker_result.return_code
+            result.tier2_output = docker_result.output
+            result.tier2_error = docker_result.error
+            status = "pass" if docker_result.passed else "fail"
+            print(
+                f"[tier2-docker] {instance_id}: {status} ({docker_result.error or 'ok'})",
+                file=sys.stderr,
+            )
 
     trajectory_record: TrajectoryRecord | None = None
     if trajectory_path:

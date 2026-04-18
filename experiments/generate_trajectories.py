@@ -117,6 +117,33 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Stop batch run when a setup/runtime infra error happens (exit code != 0/1).",
     )
+    parser.add_argument(
+        "--tier2-mode",
+        choices=["host", "docker", "off"],
+        default="host",
+        help=(
+            "Where tier2 pytest runs. 'host' (default) runs test_command inline; "
+            "'docker' delegates to SWE-bench harness per instance (requires "
+            "pare[docker-eval]); 'off' skips tier2. In docker/off mode, "
+            "--test-command and --tier2-python are ignored."
+        ),
+    )
+    parser.add_argument(
+        "--tier2-docker-run-id",
+        default=None,
+        help="SWE-bench run_id for docker tier2 (default: 'pare-<model>-<timestamp>').",
+    )
+    parser.add_argument(
+        "--tier2-docker-timeout",
+        type=int,
+        default=1800,
+        help="Per-instance harness timeout in seconds (default: 1800).",
+    )
+    parser.add_argument(
+        "--tier2-docker-model-name",
+        default="pare_v6",
+        help="model_name_or_path recorded in harness predictions (default: pare_v6).",
+    )
     return parser
 
 
@@ -207,6 +234,10 @@ async def generate_trajectories(
     max_tool_calls: int = 40,
     max_tool_calls_per_step: int = 12,
     stop_on_setup_error: bool = False,
+    tier2_mode: str = "host",
+    tier2_docker_run_id: str | None = None,
+    tier2_docker_timeout: int = 1800,
+    tier2_docker_model_name: str = "pare_v6",
 ) -> GenerationReport:
     if not tasks:
         raise GenerationError("tasks list is empty")
@@ -221,51 +252,87 @@ async def generate_trajectories(
     runs_agent_failed = 0
     runs_setup_failed = 0
 
-    for task in selected_tasks:
-        run_cwd = Path(task.cwd).resolve() if task.cwd else default_cwd
-        raw_test_command = task.tier2_command or test_command
-        run_test_command = _resolve_tier2_command(raw_test_command, python_bin)
+    # Build one DockerEvalSession for the whole batch — dataset load (~5s)
+    # and docker handshake happen exactly once. Import lazily so default
+    # (host mode) runs don't pay the swebench / datasets import cost.
+    docker_session = None
+    if tier2_mode == "docker":
+        from pare.sandbox.docker_eval import DockerEvalConfig, build_session
 
-        for seed in run_seeds:
-            exit_code = await run_headless(
-                task=task.task,
-                provider=provider,
-                model=model,
-                api_key=api_key,
-                base_url=base_url,
-                cwd=run_cwd,
-                output_path=None,
-                trajectory_path=trajectory_jsonl,
-                instance_id=task.instance_id,
-                seed=seed,
-                test_command=run_test_command,
-                test_timeout=test_timeout,
-                use_planning=use_planning,
-                max_tool_calls=max_tool_calls,
-                max_tool_calls_per_step=max_tool_calls_per_step,
-                verbose=False,
+        import time as _time
+        resolved_run_id = tier2_docker_run_id or (
+            f"pare-{tier2_docker_model_name}-{int(_time.time())}"
+        )
+        docker_session = build_session(
+            DockerEvalConfig(
+                model_name=tier2_docker_model_name,
+                run_id=resolved_run_id,
+                timeout=tier2_docker_timeout,
+            )
+        )
+        if test_command or tier2_python:
+            print(
+                "[warn] --test-command / --tier2-python ignored under "
+                "--tier2-mode=docker (tier2 runs inside SWE-bench image)",
+                file=sys.stderr,
             )
 
-            if exit_code == 0:
-                runs_completed += 1
-                runs_succeeded += 1
-            elif exit_code == 1:
-                runs_completed += 1
-                runs_agent_failed += 1
+    tier2_verifier = docker_session.verify_diff if docker_session is not None else None
+
+    try:
+        for task in selected_tasks:
+            run_cwd = Path(task.cwd).resolve() if task.cwd else default_cwd
+            if tier2_mode == "host":
+                raw_test_command = task.tier2_command or test_command
+                run_test_command = _resolve_tier2_command(raw_test_command, python_bin)
             else:
-                runs_setup_failed += 1
-                if stop_on_setup_error:
-                    return GenerationReport(
-                        tasks_loaded=len(tasks),
-                        tasks_run=len(selected_tasks),
-                        runs_requested=runs_requested,
-                        runs_completed=runs_completed,
-                        runs_succeeded=runs_succeeded,
-                        runs_agent_failed=runs_agent_failed,
-                        runs_setup_failed=runs_setup_failed,
-                        seeds=list(run_seeds),
-                        trajectory_jsonl=trajectory_jsonl,
-                    )
+                run_test_command = None
+
+            for seed in run_seeds:
+                exit_code = await run_headless(
+                    task=task.task,
+                    provider=provider,
+                    model=model,
+                    api_key=api_key,
+                    base_url=base_url,
+                    cwd=run_cwd,
+                    output_path=None,
+                    trajectory_path=trajectory_jsonl,
+                    instance_id=task.instance_id,
+                    seed=seed,
+                    test_command=run_test_command,
+                    test_timeout=test_timeout,
+                    use_planning=use_planning,
+                    max_tool_calls=max_tool_calls,
+                    max_tool_calls_per_step=max_tool_calls_per_step,
+                    tier2_mode=tier2_mode,
+                    tier2_verifier=tier2_verifier,
+                    verbose=False,
+                )
+
+                if exit_code == 0:
+                    runs_completed += 1
+                    runs_succeeded += 1
+                elif exit_code == 1:
+                    runs_completed += 1
+                    runs_agent_failed += 1
+                else:
+                    runs_setup_failed += 1
+                    if stop_on_setup_error:
+                        return GenerationReport(
+                            tasks_loaded=len(tasks),
+                            tasks_run=len(selected_tasks),
+                            runs_requested=runs_requested,
+                            runs_completed=runs_completed,
+                            runs_succeeded=runs_succeeded,
+                            runs_agent_failed=runs_agent_failed,
+                            runs_setup_failed=runs_setup_failed,
+                            seeds=list(run_seeds),
+                            trajectory_jsonl=trajectory_jsonl,
+                        )
+    finally:
+        if docker_session is not None:
+            docker_session.close()
 
     return GenerationReport(
         tasks_loaded=len(tasks),
@@ -323,6 +390,10 @@ def main(argv: list[str] | None = None) -> int:
                 max_tool_calls=args.max_tool_calls,
                 max_tool_calls_per_step=args.max_tool_calls_per_step,
                 stop_on_setup_error=args.stop_on_setup_error,
+                tier2_mode=args.tier2_mode,
+                tier2_docker_run_id=args.tier2_docker_run_id,
+                tier2_docker_timeout=args.tier2_docker_timeout,
+                tier2_docker_model_name=args.tier2_docker_model_name,
             )
         )
     except Exception as e:

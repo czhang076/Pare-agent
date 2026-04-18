@@ -24,6 +24,11 @@ dev = [
     "ruff>=0.8",
     "mypy>=1.13",
 ]
+docker-eval = [
+    "swebench==3.0.15",
+    "docker>=7.0,<8",
+    "datasets>=2.19",
+]
 
 [project.scripts]
 pare = "pare.main:main"
