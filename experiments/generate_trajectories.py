@@ -310,10 +310,16 @@ def main(argv: list[str] | None = None) -> int:
         # with cwd=workdir (e.g. data/swebench_workdirs/<instance>), so a
         # relative path like `.venv-sympy/Scripts/python.exe` — which
         # resolves against the CLI invocation directory — breaks the moment
-        # we hand it to a subprocess with a different cwd. Users routinely
-        # pass relative paths; resolving here makes the knob forgiving.
+        # we hand it to a subprocess with a different cwd.
+        #
+        # Use absolute() not resolve(): resolve() follows symlinks, and a
+        # venv's bin/python IS a symlink (→ /usr/bin/python3.12 on Linux).
+        # Resolving it defeats the whole venv mechanism — sys.prefix logic
+        # keys on sys.argv[0] being inside the venv dir, so the subprocess
+        # silently runs the *system* interpreter without the venv's packages
+        # (pytest, mpmath). Tier2 then fails with ModuleNotFoundError.
         tier2_python = (
-            str(Path(args.tier2_python).resolve())
+            str(Path(args.tier2_python).absolute())
             if args.tier2_python else None
         )
 

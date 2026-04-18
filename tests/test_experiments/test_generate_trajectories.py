@@ -142,7 +142,11 @@ class TestGenerateTrajectories:
         """`--tier2-python .venv-sympy/Scripts/python.exe` must reach
         generate_trajectories as an absolute path. tier2 subprocesses run
         with cwd=workdir, so relative paths (which resolve against CLI
-        invocation dir) break. This test locks in the CLI-side resolve."""
+        invocation dir) break. This test locks in the CLI-side resolve.
+
+        Must use absolute() not resolve(): venv `bin/python` is a symlink
+        → system interpreter, and resolve() would follow it, defeating the
+        venv."""
         tasks_path = tmp_path / "tasks.jsonl"
         _write_tasks(tasks_path, [{"instance_id": "swe-1", "task": "Task"}])
 
@@ -168,10 +172,54 @@ class TestGenerateTrajectories:
         assert code == 0
         resolved = captured_kwargs["tier2_python"]
         assert resolved is not None
-        # Absolute path: on all platforms Path.resolve() produces an absolute.
         assert Path(resolved).is_absolute()
         # Still ends with the user-supplied relative tail.
         assert resolved.replace("\\", "/").endswith("some_venv/bin/python")
+
+    def test_main_does_not_follow_symlink_for_tier2_python(self, tmp_path: Path):
+        """Locks in absolute() vs resolve() — a venv's python is a symlink
+        to the system interpreter; following it breaks the venv."""
+        import os
+        real_target = tmp_path / "real_python"
+        real_target.write_text("#!/usr/bin/env bash\n")
+        venv_bin = tmp_path / "venv" / "bin"
+        venv_bin.mkdir(parents=True)
+        link_path = venv_bin / "python"
+        try:
+            os.symlink(real_target, link_path)
+        except (OSError, NotImplementedError):
+            import pytest
+            pytest.skip("symlinks not supported on this platform")
+
+        tasks_path = tmp_path / "tasks.jsonl"
+        _write_tasks(tasks_path, [{"instance_id": "swe-1", "task": "Task"}])
+
+        captured_kwargs: dict = {}
+
+        async def _fake_generate(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            from experiments.generate_trajectories import GenerationReport
+            return GenerationReport(
+                tasks_loaded=1, tasks_run=1,
+                runs_requested=1, runs_completed=1,
+                runs_succeeded=1, runs_agent_failed=0, runs_setup_failed=0,
+                seeds=[0], trajectory_jsonl=tmp_path / "traj.jsonl",
+            )
+
+        with patch("experiments.generate_trajectories.generate_trajectories", _fake_generate):
+            code = main([
+                "--tasks-jsonl", str(tasks_path),
+                "--trajectory-jsonl", str(tmp_path / "traj.jsonl"),
+                "--tier2-python", str(link_path),
+            ])
+
+        assert code == 0
+        resolved = captured_kwargs["tier2_python"]
+        # Critical: must still end with the venv path, NOT the real target.
+        assert resolved.replace("\\", "/").endswith("venv/bin/python"), (
+            f"expected symlink path preserved, got {resolved}"
+        )
+        assert "real_python" not in resolved
 
     def test_main_passes_none_tier2_python_when_not_given(self, tmp_path: Path):
         """When `--tier2-python` is not supplied, tier2_python must stay None
