@@ -20,8 +20,16 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Maximum size for the memory index (in characters).
-# At ~3.5 chars/token, this keeps it under ~1000 tokens.
-_MAX_INDEX_CHARS = 3500
+# At ~3.5 chars/token, this keeps it under ~2800 tokens.
+#
+# Raised from 3500 → 10000: for large repos (sympy, astropy, django), Orient
+# emits a tree + 20 file signatures + git info that alone exceeds 3500 chars,
+# so MEMORY.md arrived truncated in the middle of the signature list on every
+# sympy20 run. That silently stripped the recon context that both the planner
+# and the executor rely on. 10000 chars adds ~1800 tokens to every LLM call
+# — acceptable cost to keep the index intact; revisit if it starts dominating
+# prompt budget on small repos.
+_MAX_INDEX_CHARS = 10000
 
 
 class MemoryIndex:

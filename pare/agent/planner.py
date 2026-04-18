@@ -147,11 +147,19 @@ Your job is to create a structured plan to accomplish the task.
 explanation, no text outside the JSON.
 - Each step should be a coarse-grained goal ("modify the auth module"), \
 not a fine-grained action ("change line 47").
-- Steps should be ordered logically: understand first, then modify, then test.
+- Repository context has ALREADY been gathered (see "Repository Context" \
+above). Do NOT create a step whose only purpose is broad exploration or \
+"understand the codebase". When a step edits file X, that same step should \
+read X first — folding the read into the modification step, not into a \
+separate recon step. A recon-only step burns the per-step tool-call budget \
+on reads and leaves no budget for edits.
+- Steps should drive directly toward the fix: locate-and-modify, then \
+verify. For most tasks 1-2 steps is enough; 3+ steps only when the change \
+truly spans independent modules.
 - Estimate which files each step will need to read or modify.
-- Set a realistic budget (max tool calls) for each step. Simple reads: \
-3-5. Complex edits: 10-15.
-- For simple tasks (single file edit, quick fix), use 1-2 steps max.
+- Set a realistic budget (max tool calls) per step. A single-file fix \
+typically needs ~2-3 reads + 1-3 edits + 1 test = 6-10 calls. A multi-file \
+fix: 10-15.
 - Do NOT over-plan. If the task is simple, the plan should be simple.
 
 ## Output Schema
