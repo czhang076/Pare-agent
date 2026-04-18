@@ -271,8 +271,21 @@ async def run_headless(
     # B1.1 (incomplete fix) classifier. Synthesizing from file_edit tool
     # result_content is unreliable — those results are confirmation
     # strings, not unified diffs.
+    #
+    # Critical: first commit any uncommitted working-tree changes. The
+    # orchestrator only runs `checkpoint()` after a step's `result.success`
+    # is True — so when every step fails (as in all 20 sympy20 pilot runs),
+    # the agent's file_edit changes sit uncommitted and `git diff BRANCH HEAD`
+    # returns nothing (or only Pare's own .pare/MEMORY.md noise committed at
+    # "before task execution"). Doing one last checkpoint here is a no-op
+    # when the tree is clean (see GitCheckpoint.checkpoint) and captures
+    # the agent's real edits when it isn't.
     final_diff = ""
     if agent.checkpoint is not None and agent.checkpoint.is_active:
+        try:
+            await agent.checkpoint.checkpoint("finalize: capture agent state")
+        except Exception as e:
+            print(f"[warn] could not checkpoint before diff: {e}", file=sys.stderr)
         try:
             final_diff = await agent.checkpoint.get_full_diff()
         except Exception as e:

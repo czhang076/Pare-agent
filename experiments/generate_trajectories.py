@@ -306,6 +306,17 @@ def main(argv: list[str] | None = None) -> int:
         tasks = load_tasks_jsonl(Path(args.tasks_jsonl))
         seeds = parse_seed_list(args.seeds)
 
+        # Resolve --tier2-python to an absolute path if given. tier2 runs
+        # with cwd=workdir (e.g. data/swebench_workdirs/<instance>), so a
+        # relative path like `.venv-sympy/Scripts/python.exe` — which
+        # resolves against the CLI invocation directory — breaks the moment
+        # we hand it to a subprocess with a different cwd. Users routinely
+        # pass relative paths; resolving here makes the knob forgiving.
+        tier2_python = (
+            str(Path(args.tier2_python).resolve())
+            if args.tier2_python else None
+        )
+
         report = asyncio.run(
             generate_trajectories(
                 tasks,
@@ -319,7 +330,7 @@ def main(argv: list[str] | None = None) -> int:
                 max_instances=args.max_instances,
                 test_command=args.test_command,
                 test_timeout=args.test_timeout,
-                tier2_python=args.tier2_python,
+                tier2_python=tier2_python,
                 use_planning=args.use_planning,
                 max_tool_calls=args.max_tool_calls,
                 max_tool_calls_per_step=args.max_tool_calls_per_step,

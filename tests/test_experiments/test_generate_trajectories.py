@@ -138,6 +138,68 @@ class TestGenerateTrajectories:
         assert _resolve_tier2_command(None, "/x/py") is None
         assert _resolve_tier2_command("", "/x/py") is None
 
+    def test_main_resolves_relative_tier2_python_to_absolute(self, tmp_path: Path):
+        """`--tier2-python .venv-sympy/Scripts/python.exe` must reach
+        generate_trajectories as an absolute path. tier2 subprocesses run
+        with cwd=workdir, so relative paths (which resolve against CLI
+        invocation dir) break. This test locks in the CLI-side resolve."""
+        tasks_path = tmp_path / "tasks.jsonl"
+        _write_tasks(tasks_path, [{"instance_id": "swe-1", "task": "Task"}])
+
+        captured_kwargs: dict = {}
+
+        async def _fake_generate(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            from experiments.generate_trajectories import GenerationReport
+            return GenerationReport(
+                tasks_loaded=1, tasks_run=1,
+                runs_requested=1, runs_completed=1,
+                runs_succeeded=1, runs_agent_failed=0, runs_setup_failed=0,
+                seeds=[0], trajectory_jsonl=tmp_path / "traj.jsonl",
+            )
+
+        with patch("experiments.generate_trajectories.generate_trajectories", _fake_generate):
+            code = main([
+                "--tasks-jsonl", str(tasks_path),
+                "--trajectory-jsonl", str(tmp_path / "traj.jsonl"),
+                "--tier2-python", "some_venv/bin/python",
+            ])
+
+        assert code == 0
+        resolved = captured_kwargs["tier2_python"]
+        assert resolved is not None
+        # Absolute path: on all platforms Path.resolve() produces an absolute.
+        assert Path(resolved).is_absolute()
+        # Still ends with the user-supplied relative tail.
+        assert resolved.replace("\\", "/").endswith("some_venv/bin/python")
+
+    def test_main_passes_none_tier2_python_when_not_given(self, tmp_path: Path):
+        """When `--tier2-python` is not supplied, tier2_python must stay None
+        so `_resolve_tier2_command` falls back to sys.executable."""
+        tasks_path = tmp_path / "tasks.jsonl"
+        _write_tasks(tasks_path, [{"instance_id": "swe-1", "task": "Task"}])
+
+        captured_kwargs: dict = {}
+
+        async def _fake_generate(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            from experiments.generate_trajectories import GenerationReport
+            return GenerationReport(
+                tasks_loaded=1, tasks_run=1,
+                runs_requested=1, runs_completed=1,
+                runs_succeeded=1, runs_agent_failed=0, runs_setup_failed=0,
+                seeds=[0], trajectory_jsonl=tmp_path / "traj.jsonl",
+            )
+
+        with patch("experiments.generate_trajectories.generate_trajectories", _fake_generate):
+            code = main([
+                "--tasks-jsonl", str(tasks_path),
+                "--trajectory-jsonl", str(tmp_path / "traj.jsonl"),
+            ])
+
+        assert code == 0
+        assert captured_kwargs["tier2_python"] is None
+
     async def test_generate_counts_with_mixed_exit_codes(self, tmp_path: Path):
         tasks = [
             GenerationTask(instance_id="swe-1", task="Task A"),
