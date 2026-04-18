@@ -31,6 +31,48 @@ _DOCKER_EXTRA_HINT = (
 )
 
 
+def _strip_pare_internal_paths(diff: str) -> str:
+    """Drop hunks touching Pare's own bookkeeping files (``.pare/*``).
+
+    ``GitCheckpoint.get_full_diff()`` records everything the agent modified
+    under the workspace, including Pare's own MEMORY.md / history.jsonl which
+    live in ``.pare/``. Those files don't exist inside the SWE-bench image, so
+    ``git apply`` (and every fallback) fails with "can't find file to patch"
+    and no report.json is written. We keep ``final_diff`` in the trajectory
+    untouched — Module A/B still see the full picture — and hand only the
+    real source hunks to the harness.
+    """
+    if not diff:
+        return diff
+    # Split keeping the "diff --git " prefix with each hunk. The first chunk
+    # before the first "diff --git " is preamble (usually empty); preserve it.
+    parts = diff.split("\ndiff --git ")
+    kept: list[str] = []
+    for idx, part in enumerate(parts):
+        header = part if idx == 0 else "diff --git " + part
+        # A unified-diff hunk header looks like:
+        #   diff --git a/<path> b/<path>
+        first_line = header.split("\n", 1)[0]
+        tokens = first_line.split()
+        # tokens == ["diff", "--git", "a/<path>", "b/<path>"]
+        if len(tokens) >= 4:
+            a_path = tokens[2][2:] if tokens[2].startswith("a/") else tokens[2]
+            b_path = tokens[3][2:] if tokens[3].startswith("b/") else tokens[3]
+            if a_path.startswith(".pare/") or b_path.startswith(".pare/"):
+                continue
+        kept.append(header)
+    if not kept:
+        return ""
+    # Rejoin: first element already contains its own prefix (or is preamble);
+    # subsequent ones already carry "diff --git ". Separator is just "\n".
+    out = kept[0]
+    for chunk in kept[1:]:
+        if not out.endswith("\n"):
+            out += "\n"
+        out += chunk
+    return out
+
+
 class DockerEvalUnavailable(RuntimeError):
     """Raised when the docker-eval extra is not installed or the daemon is unreachable."""
 
@@ -170,6 +212,17 @@ class DockerEvalSession:
                 error="empty_diff_skipped_docker",
             )
 
+        harness_diff = _strip_pare_internal_paths(final_diff)
+        if not harness_diff.strip():
+            return Tier2CheckResult(
+                enabled=True,
+                command=f"swebench:{instance_id}",
+                passed=False,
+                return_code=None,
+                output="",
+                error="empty_diff_after_pare_strip",
+            )
+
         try:
             self._ensure_ready()
         except DockerEvalUnavailable as e:
@@ -197,7 +250,7 @@ class DockerEvalSession:
         pred = {
             "instance_id": instance_id,
             "model_name_or_path": self.config.model_name,
-            "model_patch": final_diff,
+            "model_patch": harness_diff,
         }
 
         try:

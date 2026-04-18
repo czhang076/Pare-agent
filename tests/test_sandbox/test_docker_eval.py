@@ -18,6 +18,7 @@ from pare.sandbox.docker_eval import (
     DockerEvalConfig,
     DockerEvalSession,
     DockerEvalUnavailable,
+    _strip_pare_internal_paths,
     build_session,
 )
 
@@ -325,6 +326,89 @@ def test_close_is_idempotent(tmp_path: Path) -> None:
 def test_close_before_any_call_is_safe(tmp_path: Path) -> None:
     session = _make_session(tmp_path)
     session.close()  # no _ensure_ready was ever called
+
+
+# ---------------------------------------------------------------------------
+# .pare/* stripping before handing diff to harness
+# ---------------------------------------------------------------------------
+
+
+_REAL_HUNK = (
+    "diff --git a/sympy/geometry/point.py b/sympy/geometry/point.py\n"
+    "index 1111111..2222222 100644\n"
+    "--- a/sympy/geometry/point.py\n"
+    "+++ b/sympy/geometry/point.py\n"
+    "@@ -1,1 +1,1 @@\n"
+    "-old\n"
+    "+new\n"
+)
+_PARE_MEMORY_HUNK = (
+    "diff --git a/.pare/MEMORY.md b/.pare/MEMORY.md\n"
+    "index 3333333..4444444 100644\n"
+    "--- a/.pare/MEMORY.md\n"
+    "+++ b/.pare/MEMORY.md\n"
+    "@@ -1,1 +1,1 @@\n"
+    "-a\n"
+    "+b\n"
+)
+_PARE_HISTORY_HUNK = (
+    "diff --git a/.pare/history.jsonl b/.pare/history.jsonl\n"
+    "new file mode 100644\n"
+    "index 0000000..5555555\n"
+    "--- /dev/null\n"
+    "+++ b/.pare/history.jsonl\n"
+    "@@ -0,0 +1,1 @@\n"
+    '+{"event": "x"}\n'
+)
+
+
+def test_strip_pare_paths_removes_only_pare_hunks() -> None:
+    diff = _REAL_HUNK + _PARE_MEMORY_HUNK + _PARE_HISTORY_HUNK
+    out = _strip_pare_internal_paths(diff)
+    assert "sympy/geometry/point.py" in out
+    assert ".pare/MEMORY.md" not in out
+    assert ".pare/history.jsonl" not in out
+
+
+def test_strip_pare_paths_preserves_pure_source_diff() -> None:
+    out = _strip_pare_internal_paths(_REAL_HUNK)
+    assert out == _REAL_HUNK
+
+
+def test_strip_pare_paths_all_internal_yields_empty() -> None:
+    out = _strip_pare_internal_paths(_PARE_MEMORY_HUNK + _PARE_HISTORY_HUNK)
+    assert out == ""
+
+
+def test_verify_diff_strips_pare_paths_before_harness(tmp_path: Path) -> None:
+    session = _make_session(tmp_path)
+    stubs = _install_stubs(session, instance_ids=["sympy__sympy-11618"])
+    _write_report(
+        session.config.logs_root,
+        session.config,
+        "sympy__sympy-11618",
+        {"resolved": True},
+    )
+
+    polluted = _REAL_HUNK + _PARE_MEMORY_HUNK
+    result = session.verify_diff("sympy__sympy-11618", polluted)
+
+    assert result.passed is True
+    kwargs = stubs.run_instance.call_args.kwargs
+    sent_patch = kwargs["pred"]["model_patch"]
+    assert "sympy/geometry/point.py" in sent_patch
+    assert ".pare/MEMORY.md" not in sent_patch
+
+
+def test_verify_diff_only_pare_paths_short_circuits(tmp_path: Path) -> None:
+    session = _make_session(tmp_path)
+    stubs = _install_stubs(session, instance_ids=["sympy__sympy-11618"])
+
+    result = session.verify_diff("sympy__sympy-11618", _PARE_MEMORY_HUNK)
+
+    assert result.passed is False
+    assert result.error == "empty_diff_after_pare_strip"
+    stubs.run_instance.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
