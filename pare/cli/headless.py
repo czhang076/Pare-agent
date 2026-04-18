@@ -280,24 +280,31 @@ async def run_headless(
     # "before task execution"). Doing one last checkpoint here is a no-op
     # when the tree is clean (see GitCheckpoint.checkpoint) and captures
     # the agent's real edits when it isn't.
+    # Cache the checkpoint reference to avoid re-reading the property mid-call
+    # (defensive against any future orchestrator path that might clear it).
     final_diff = ""
     cp = agent.checkpoint
-    print(
-        f"[diag] checkpoint_present={cp is not None} "
-        f"is_active={cp.is_active if cp is not None else 'n/a'} "
-        f"original_branch={cp.original_branch if cp is not None else 'n/a'} "
-        f"working_branch={cp.working_branch if cp is not None else 'n/a'}",
-        file=sys.stderr,
-    )
-    if cp is not None and cp.is_active:
+    if cp is None:
+        # Surface silent setup failure — `_setup_checkpoint` catches
+        # `GitCheckpointError` with `logger.debug`, so a stale working
+        # branch from a previous run (collision on `checkout -b`) means
+        # no checkpoint and a silently empty final_diff. Observed during
+        # sympy20 smoke3: smoke2 left `pare/working-<sha>` behind, smoke3's
+        # setup failed, Fix A's if-block skipped, final_diff=0 with no
+        # warning. Warn here so it can't happen quietly again.
+        print(
+            "[warn] no git checkpoint active — final_diff will be empty. "
+            "A leftover working branch from a prior run may have caused "
+            "checkout -b to fail at setup time.",
+            file=sys.stderr,
+        )
+    elif cp.is_active:
         try:
-            sha = await cp.checkpoint("finalize: capture agent state")
-            print(f"[diag] finalize checkpoint sha={sha}", file=sys.stderr)
+            await cp.checkpoint("finalize: capture agent state")
         except Exception as e:
             print(f"[warn] could not checkpoint before diff: {e}", file=sys.stderr)
         try:
             final_diff = await cp.get_full_diff()
-            print(f"[diag] get_full_diff returned {len(final_diff)} bytes", file=sys.stderr)
         except Exception as e:
             print(f"[warn] could not capture final_diff: {e}", file=sys.stderr)
 
