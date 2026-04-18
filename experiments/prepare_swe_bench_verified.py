@@ -189,7 +189,7 @@ def _build_tier2_command(fail_to_pass: list[str], test_patch: str = "") -> str:
     normalize to node-id form and fall into branch (a).
 
     Quoting: each token is shlex-quoted so parametrized ids and names with
-    whitespace survive shell=True on both Unix and Windows.
+    whitespace survive `shell=True`.
 
     The `{python}` placeholder is substituted by the runner with the active
     interpreter path so tier2 uses the same venv as the pipeline, not

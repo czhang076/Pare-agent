@@ -110,26 +110,23 @@ class TestGenerateTrajectories:
         assert mock_run.await_args_list[1].kwargs["test_command"] == "pytest global.py"
 
     def test_resolve_tier2_substitutes_python_placeholder(self):
-        """Spaces in the python path must be shell-quoted."""
+        """Spaces in the python path must be shlex-quoted."""
         resolved = _resolve_tier2_command(
-            "{python} -m pytest foo.py", "C:/venv with space/python.exe"
+            "{python} -m pytest foo.py", "/opt/venv with space/bin/python"
         )
         assert resolved is not None
         assert "{python}" not in resolved
         assert "pytest foo.py" in resolved
-        assert "C:/venv with space/python.exe" in resolved
-        # Spaces require quoting on both platforms.
-        assert "'" in resolved or '"' in resolved
+        assert "/opt/venv with space/bin/python" in resolved
+        assert "'" in resolved  # shlex.quote uses single quotes
 
     def test_resolve_tier2_no_quote_when_no_whitespace(self):
-        """Paths without whitespace must not be wrapped in quotes — cmd.exe
-        treats POSIX single quotes as literal characters, which breaks the
-        command on Windows."""
+        """shlex.quote leaves paths with only safe characters un-quoted."""
         resolved = _resolve_tier2_command(
-            "{python} -m pytest foo.py", r"E:\venv\Scripts\python.exe"
+            "{python} -m pytest foo.py", "/home/user/.venv/bin/python"
         )
         assert resolved is not None
-        assert resolved.startswith(r"E:\venv\Scripts\python.exe -m pytest")
+        assert resolved.startswith("/home/user/.venv/bin/python -m pytest")
         assert "'" not in resolved
         assert '"' not in resolved
 

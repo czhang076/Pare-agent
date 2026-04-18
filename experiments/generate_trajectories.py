@@ -20,35 +20,17 @@ if __package__ in (None, ""):
 from pare.cli.headless import run_headless
 
 
-def _quote_for_shell(path: str) -> str:
-    """Quote an argument for `subprocess.run(..., shell=True)`.
-
-    On Windows the shell is cmd.exe, which does not honor POSIX single
-    quotes — it uses double quotes. On Unix we defer to shlex. We only
-    add quotes when the path contains whitespace; pytest/python paths
-    without spaces work raw on both shells and avoid GBK-mangling when
-    subprocess echoes the command back.
-    """
-    if not any(ch.isspace() for ch in path):
-        return path
-    if sys.platform == "win32":
-        escaped = path.replace('"', r"\"")
-        return f'"{escaped}"'
-    return shlex.quote(path)
-
-
 def _resolve_tier2_command(template: str | None, python_bin: str) -> str | None:
     """Substitute the `{python}` placeholder in a tier2 command template.
 
     Returns None when template is None or empty. The python binary is
-    shell-quoted in a platform-appropriate way so venv paths (with
-    spaces or backslashes) work under both cmd.exe and /bin/sh.
+    shlex-quoted so venv paths with whitespace survive `shell=True`.
     """
     if not template:
         return None
     if "{python}" not in template:
         return template
-    return template.replace("{python}", _quote_for_shell(python_bin))
+    return template.replace("{python}", shlex.quote(python_bin))
 
 
 class GenerationError(ValueError):

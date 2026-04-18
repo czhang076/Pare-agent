@@ -350,12 +350,7 @@ async def run_headless(
         output_path.write_text(json.dumps(result_dict, indent=2, ensure_ascii=False))
         print(f"[output] {output_path}", file=sys.stderr)
 
-    # Final text to stdout (for piping). Encode via stdout's encoding with
-    # errors='replace' so non-ASCII output (e.g. ✓) doesn't crash on
-    # legacy Windows consoles (cp936 / GBK).
     if result.output:
-        enc = getattr(sys.stdout, "encoding", None) or "utf-8"
-        safe = result.output.encode(enc, errors="replace").decode(enc, errors="replace")
-        print(safe)
+        print(result.output)
 
     return 0 if result.success else 1

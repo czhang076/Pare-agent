@@ -65,9 +65,6 @@ class BashTool(Tool):
         timeout = params.get("timeout", _DEFAULT_TIMEOUT)
 
         try:
-            # Use create_subprocess_shell which handles platform differences
-            # (cmd.exe on Windows, /bin/sh on Unix). On Windows with Git Bash
-            # in PATH, bash commands work through the shell layer.
             env = {**os.environ, **context.env} if context.env else None
             process = await asyncio.create_subprocess_shell(
                 command,

@@ -60,8 +60,6 @@ class TestBashTool:
         cmd = f'"{sys.executable}" -c "import os; print(os.getcwd())"'
         result = await tool.execute({"command": cmd}, ctx)
         assert result.success is True
-        # The output should contain the tmp_path
-        # (normalize for Windows: compare basenames)
         assert ctx.cwd.name in result.output
 
     @pytest.mark.asyncio
