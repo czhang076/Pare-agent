@@ -40,7 +40,13 @@ def _install_stubs(
 ) -> SimpleNamespace:
     """Bypass _require_extra by injecting stubs for swebench/docker/datasets."""
     run_instance = run_instance or MagicMock(return_value=None)
-    make_test_spec = MagicMock(side_effect=lambda row: SimpleNamespace(instance_id=row["instance_id"]))
+    make_test_spec = MagicMock(
+        side_effect=lambda row, **kw: SimpleNamespace(
+            instance_id=row["instance_id"],
+            namespace=kw.get("namespace"),
+            instance_image_tag=kw.get("instance_image_tag"),
+        )
+    )
     load_dataset = MagicMock(return_value=_stub_dataset(instance_ids or ["i1"]))
 
     docker_client = MagicMock()
@@ -267,6 +273,22 @@ def test_dataset_loaded_once_for_multiple_instances(tmp_path: Path) -> None:
 
     assert stubs.load_dataset.call_count == 1
     assert stubs.run_instance.call_count == 3
+
+
+def test_make_test_spec_receives_namespace_and_tag(tmp_path: Path) -> None:
+    """Regression for docker-hub pull: harness needs namespace="swebench" and
+    instance_image_tag="latest" or it tries to build locally from a missing
+    env image layer ("Environment image ... not found")."""
+    session = _make_session(tmp_path)
+    stubs = _install_stubs(session, instance_ids=["i1"])
+    _write_report(session.config.logs_root, session.config, "i1", {"resolved": True})
+
+    session.verify_diff("i1", "diff\n")
+
+    assert stubs.make_test_spec.call_count == 1
+    _, kwargs = stubs.make_test_spec.call_args
+    assert kwargs.get("namespace") == "swebench"
+    assert kwargs.get("instance_image_tag") == "latest"
 
 
 def test_test_spec_memoized(tmp_path: Path) -> None:

@@ -42,6 +42,13 @@ class DockerEvalConfig:
     Defaults match the harness defaults that minimise image churn across a
     batch run (rm_image=False, cache_level="env"). Bump timeout for
     sympy/django which run >20min of tests on cold pytest startup.
+
+    `namespace="swebench"` makes make_test_spec emit registry-prefixed tags
+    (swebench/sweb.eval.x86_64.<iid>:latest) so run_instance pulls the
+    pre-built instance image from Docker Hub instead of trying to build it
+    from a local `sweb.env.*` layer — which is what fails with
+    "Environment image ... not found" when the env layer was never built
+    locally. Set to None only if you're building images yourself.
     """
 
     dataset_name: str = "princeton-nlp/SWE-bench_Verified"
@@ -52,6 +59,8 @@ class DockerEvalConfig:
     cache_level: str = "env"
     rm_image: bool = False
     force_rebuild: bool = False
+    namespace: str | None = "swebench"
+    instance_image_tag: str = "latest"
     # Where run_instance writes report.json. Harness default is
     # logs/run_evaluation/<run_id>/<model>/<instance>/ under CWD.
     logs_root: Path = Path("logs/run_evaluation")
@@ -132,7 +141,14 @@ class DockerEvalSession:
                 f"instance_id {instance_id!r} not in dataset "
                 f"{self.config.dataset_name}:{self.config.split}"
             )
-        return self._make_test_spec(row)
+        # namespace + instance_image_tag are required by swebench>=3.0 so
+        # run_instance pulls the pre-built image from Docker Hub instead
+        # of building locally from a missing env layer.
+        return self._make_test_spec(
+            row,
+            namespace=self.config.namespace,
+            instance_image_tag=self.config.instance_image_tag,
+        )
 
     # -- main entry point ----------------------------------------------------
 
