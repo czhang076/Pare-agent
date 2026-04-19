@@ -1,30 +1,43 @@
 [project]
 name = "pare"
-version = "0.1.0"
-description = "The coding agent that never breaks your repo"
+version = "0.2.0"
+description = "Opinionated observability + CI layer for coding agents, on top of Langfuse"
 requires-python = ">=3.12"
 license = "MIT"
 
+# Pare 2.0 is observer-only: a Trajectory Inspector CLI that consumes
+# JSONL agent traces, classifies failures, and renders side-by-side HTML
+# diff reports. Runtime primitives (loop, container, classifiers) live in
+# the research repo (pare-research). This package depends on it as a lib.
 dependencies = [
-    # LLM SDKs
-    "anthropic>=0.40.0",
-    "openai>=1.50.0",
-
-    # CLI
+    # HTML report rendering
+    "jinja2>=3.1",
+    # Terminal output for the CLI driver
     "rich>=13.0",
-    "prompt-toolkit>=3.0",
-
-    # Data validation
-    "pydantic>=2.0",
-
-    # Async
-    "anyio>=4.0",
-
-    # Token counting (OpenAI models)
-    "tiktoken>=0.7.0",
+    # CLI argument parsing
+    "click>=8.1",
 ]
 
 [project.optional-dependencies]
+# Research primitives (schema_v2, classifier_liu, recovery_detector_v2,
+# error_signal_extractor) — installed from the research branch as a lib.
+# Pinned to a branch ref until research lands on main.
+research = [
+    "pare-research @ git+https://github.com/czhang076/Pare-agent.git@claude/great-carson-333acd",
+]
+
+# W3 Langfuse emitter + W4 Agent Graph integration.
+langfuse = [
+    "langfuse>=2.0",
+    "httpx>=0.27",
+]
+
+# Post-MVP Eval-Gated CI webhook server.
+ci = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+]
+
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
@@ -33,20 +46,15 @@ dev = [
     "mypy>=1.13",
 ]
 
-mcp = [
-    "mcp>=1.0",
-]
-
-docker = [
-    "docker>=7.0",
-]
-
 [project.scripts]
-pare = "pare.main:main"
+pare = "pare.inspector.cli:main"
 
 [build-system]
 requires = ["setuptools>=75.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["pare*"]
 
 [tool.ruff]
 target-version = "py312"
