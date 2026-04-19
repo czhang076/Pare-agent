@@ -77,6 +77,127 @@ class DockerEvalUnavailable(RuntimeError):
     """Raised when the docker-eval extra is not installed or the daemon is unreachable."""
 
 
+# ---------------------------------------------------------------------------
+# Module-level TestSpec resolver (extracted from DockerEvalSession for reuse)
+# ---------------------------------------------------------------------------
+#
+# Both DockerEvalSession (Tier 2 via run_instance) and InstanceContainer
+# (agent-side long-lived container) need the same (TestSpec, image_tag) pair
+# for a given instance_id. Extracting this as a module-level function lets
+# InstanceContainer resolve the image tag without depending on a DockerEval
+# session — they are siblings, not parent/child.
+
+
+@lru_cache(maxsize=256)
+def _load_dataset_rows(dataset_name: str, split: str) -> dict[str, dict[str, Any]]:
+    """Cached dataset row lookup keyed by ``instance_id``."""
+    try:
+        from datasets import load_dataset  # type: ignore
+    except ImportError as e:
+        raise DockerEvalUnavailable(
+            f"{_DOCKER_EXTRA_HINT} (missing: {e.name})"
+        ) from e
+    logger.info(
+        "loading %s split=%s (first call ~5s, cached after)",
+        dataset_name, split,
+    )
+    ds = load_dataset(dataset_name, split=split)
+    return {r["instance_id"]: dict(r) for r in ds}
+
+
+def _spec_for(
+    instance_id: str,
+    dataset_name: str = "princeton-nlp/SWE-bench_Verified",
+    split: str = "test",
+    *,
+    namespace: str = "swebench",
+    instance_image_tag: str = "latest",
+) -> tuple[Any, str]:
+    """Return ``(TestSpec, image_tag)`` for ``instance_id``.
+
+    ``image_tag`` is the **base** swebench image tag
+    (``swebench/sweb.eval.x86_64.<iid>:<instance_image_tag>``). Callers that
+    want the Pare-derived tag (with ripgrep) should pass that to
+    :func:`pare.sandbox.image_builder.ensure_pare_image` to build the
+    derived layer — the base tag remains canonical for Tier 2 verification
+    so our numbers stay comparable to the official harness.
+    """
+    try:
+        from swebench.harness.test_spec.test_spec import make_test_spec  # type: ignore
+    except ImportError as e:
+        raise DockerEvalUnavailable(
+            f"{_DOCKER_EXTRA_HINT} (missing: {e.name})"
+        ) from e
+
+    rows = _load_dataset_rows(dataset_name, split)
+    row = rows.get(instance_id)
+    if row is None:
+        raise KeyError(
+            f"instance_id {instance_id!r} not in dataset "
+            f"{dataset_name}:{split}"
+        )
+    spec = make_test_spec(
+        row,
+        namespace=namespace,
+        instance_image_tag=instance_image_tag,
+    )
+    # make_test_spec populates spec.instance_image_key with the full tag.
+    image_tag = getattr(spec, "instance_image_key", None) or (
+        f"swebench/sweb.eval.x86_64.{instance_id}:{instance_image_tag}"
+    )
+    return spec, image_tag
+
+
+async def run_tier2_in_container(
+    container: Any,  # InstanceContainer — avoid circular import
+    final_diff: str,
+    *,
+    timeout: float = 1800.0,
+) -> Tier2CheckResult:
+    """Run SWE-bench Tier-2 verification inside an already-running container.
+
+    Unlike :meth:`DockerEvalSession.verify_diff`, this reuses the agent's
+    long-lived container instead of spinning a fresh one via
+    ``swebench.harness.run_evaluation.run_instance``. The caller keeps the
+    same environment the agent worked in, so the "tool error and test
+    failure come from identical envs" invariant holds.
+
+    R1 ships a stub that short-circuits on empty diff and otherwise records
+    ``error="run_tier2_in_container not implemented"``. Real implementation
+    lands when we port the ``eval_script`` / ``test_patch`` application
+    logic from ``swebench.harness.grading`` into an in-container pytest
+    invocation (planned alongside R3 smoke).
+    """
+    iid = getattr(container, "instance_id", "unknown")
+    if not final_diff or not final_diff.strip():
+        return Tier2CheckResult(
+            enabled=True,
+            command=f"swebench:{iid}",
+            passed=False,
+            return_code=None,
+            output="",
+            error="empty_diff_skipped_docker",
+        )
+    harness_diff = _strip_pare_internal_paths(final_diff)
+    if not harness_diff.strip():
+        return Tier2CheckResult(
+            enabled=True,
+            command=f"swebench:{iid}",
+            passed=False,
+            return_code=None,
+            output="",
+            error="empty_diff_after_pare_strip",
+        )
+    return Tier2CheckResult(
+        enabled=True,
+        command=f"swebench:{iid}",
+        passed=False,
+        return_code=None,
+        output="",
+        error="run_tier2_in_container not implemented (R3 smoke target)",
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class DockerEvalConfig:
     """Parameters controlling a DockerEvalSession.
