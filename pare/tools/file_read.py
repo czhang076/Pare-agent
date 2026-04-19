@@ -65,6 +65,9 @@ class FileReadTool(Tool):
         if forbidden:
             return ToolResult(success=False, output="", error=forbidden)
 
+        if context.exec_target == "container":
+            return await self._execute_in_container(file_path_str, params, context)
+
         # Resolve relative to working directory
         file_path = (context.cwd / file_path_str).resolve()
 
@@ -198,3 +201,69 @@ class FileReadTool(Tool):
             except (UnicodeDecodeError, ValueError):
                 continue
         return None
+
+    async def _execute_in_container(
+        self, file_path_str: str, params: dict, context: ToolContext
+    ) -> ToolResult:
+        """Container-mode read — delegates to InstanceContainer.read_file.
+
+        Path handling mirrors the host path: relative paths resolve against
+        ``context.cwd`` which, for container mode, is the container's
+        working directory (``/testbed`` by default). Absolute paths outside
+        ``/testbed`` are rejected for symmetry with the host branch's
+        relative_to() check — we do not want the agent writing to ``/etc``.
+        """
+        if context.container is None:
+            return ToolResult(
+                success=False,
+                output="",
+                error="file_read container mode requires ToolContext.container",
+            )
+
+        # Build absolute container path.
+        if file_path_str.startswith("/"):
+            abs_path = file_path_str
+        else:
+            cwd = str(context.cwd).replace("\\", "/").rstrip("/")
+            abs_path = f"{cwd}/{file_path_str}"
+
+        workdir = str(context.cwd).replace("\\", "/").rstrip("/")
+        if not abs_path.startswith(workdir + "/") and abs_path != workdir:
+            return ToolResult(
+                success=False,
+                output="",
+                error=f"Access denied: {file_path_str} is outside {workdir}.",
+            )
+
+        try:
+            content = await context.container.read_file(
+                abs_path, max_bytes=_MAX_FILE_SIZE * 10
+            )
+        except Exception as e:
+            return ToolResult(
+                success=False,
+                output="",
+                error=f"Failed to read {file_path_str}: {e}",
+            )
+
+        lines = content.splitlines()
+        total_lines = len(lines)
+        start = max(1, params.get("start_line", 1))
+        end = params.get("end_line", start + _MAX_LINES_DEFAULT - 1)
+        end = min(end, total_lines)
+        selected = lines[start - 1 : end]
+        width = len(str(end)) if end else 1
+        numbered = [
+            f"{i:{width}d}\t{line}"
+            for i, line in enumerate(selected, start=start)
+        ]
+        output = "\n".join(numbered)
+        if start > 1 or end < total_lines:
+            header = f"[{file_path_str}] lines {start}-{end} of {total_lines}"
+        else:
+            header = f"[{file_path_str}] {total_lines} lines"
+        return ToolResult(
+            success=True,
+            output=f"{header}\n{output}" if output else header,
+            metadata={"total_lines": total_lines, "start": start, "end": end},
+        )

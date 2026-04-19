@@ -64,6 +64,9 @@ class BashTool(Tool):
 
         timeout = params.get("timeout", _DEFAULT_TIMEOUT)
 
+        if context.exec_target == "container":
+            return await self._execute_in_container(command, timeout, context)
+
         try:
             env = {**os.environ, **context.env} if context.env else None
             process = await asyncio.create_subprocess_shell(
@@ -129,3 +132,60 @@ class BashTool(Tool):
                 output="",
                 error=f"Failed to execute command: {e}",
             )
+
+    async def _execute_in_container(
+        self, command: str, timeout: float, context: ToolContext
+    ) -> ToolResult:
+        """Container-mode execution — routes through InstanceContainer.exec.
+
+        Output formatting mirrors the host path: stdout merged with an
+        optional ``STDERR:\n...`` footer, truncated to the same line cap.
+        The ``metadata`` dict matches so downstream trajectory consumers
+        see a uniform shape regardless of exec_target.
+        """
+        if context.container is None:
+            return ToolResult(
+                success=False,
+                output="",
+                error="bash container mode requires ToolContext.container",
+            )
+        try:
+            r = await context.container.exec(
+                command,
+                timeout=timeout,
+                env=context.env or None,
+            )
+        except Exception as e:
+            return ToolResult(
+                success=False,
+                output="",
+                error=f"Failed to execute command in container: {e}",
+            )
+
+        if r.timed_out:
+            return ToolResult(
+                success=False,
+                output="",
+                error=f"Command timed out after {timeout}s: {command}",
+                metadata={"return_code": r.exit_code, "timed_out": True},
+            )
+
+        output_parts: list[str] = []
+        if r.stdout.strip():
+            output_parts.append(r.stdout.rstrip())
+        if r.stderr.strip():
+            output_parts.append(f"STDERR:\n{r.stderr.rstrip()}")
+        output = "\n".join(output_parts)
+
+        lines = output.splitlines()
+        if len(lines) > _DEFAULT_MAX_OUTPUT_LINES:
+            truncated = "\n".join(lines[:_DEFAULT_MAX_OUTPUT_LINES])
+            remaining = len(lines) - _DEFAULT_MAX_OUTPUT_LINES
+            output = f"{truncated}\n\n[truncated — {remaining} more lines]"
+
+        return ToolResult(
+            success=r.exit_code == 0,
+            output=output,
+            error=f"Exit code: {r.exit_code}" if r.exit_code != 0 else "",
+            metadata={"return_code": r.exit_code, "timed_out": False},
+        )

@@ -83,6 +83,11 @@ class SearchTool(Tool):
         file_glob = params.get("file_glob")
         max_results = params.get("max_results", _MAX_RESULTS)
 
+        if context.exec_target == "container":
+            return await self._search_in_container(
+                pattern, search_path, file_glob, max_results, context
+            )
+
         # Resolve search path
         full_path = (context.cwd / search_path).resolve()
         try:
@@ -244,4 +249,174 @@ class SearchTool(Tool):
             success=True,
             output=f"{len(results)} matches:\n{output}",
             metadata={"match_count": len(results)},
+        )
+
+    async def _search_in_container(
+        self,
+        pattern: str,
+        search_path: str,
+        file_glob: str | None,
+        max_results: int,
+        context: ToolContext,
+    ) -> ToolResult:
+        """Container-mode search — rg if installed, else grep -rn fallback.
+
+        Relies on the derived ``pare-eval.<iid>:latest`` image shipping
+        ripgrep. If ``rg`` is missing (offline image build fell back to the
+        base swebench tag), we use ``grep -rn`` instead — slower but
+        functionally equivalent. Both paths respect ``max_results`` by
+        trimming the output list; skip-dir handling for ``.git`` /
+        ``__pycache__`` / ``node_modules`` / virtualenvs matches the host
+        branch.
+        """
+        if context.container is None:
+            return ToolResult(
+                success=False,
+                output="",
+                error="search container mode requires ToolContext.container",
+            )
+
+        # Build absolute container path; default "." maps to workdir.
+        cwd_str = str(context.cwd).replace("\\", "/").rstrip("/")
+        if search_path in (".", ""):
+            abs_path = cwd_str
+        elif search_path.startswith("/"):
+            abs_path = search_path
+        else:
+            abs_path = f"{cwd_str}/{search_path}"
+
+        if not (abs_path == cwd_str or abs_path.startswith(cwd_str + "/")):
+            return ToolResult(
+                success=False,
+                output="",
+                error=f"Access denied: {search_path} is outside the project directory.",
+            )
+
+        has_rg = await self._container_has_rg(context)
+        if has_rg:
+            return await self._search_ripgrep_in_container(
+                pattern, abs_path, file_glob, max_results, context
+            )
+        return await self._search_grep_in_container(
+            pattern, abs_path, file_glob, max_results, context
+        )
+
+    @staticmethod
+    async def _container_has_rg(context: ToolContext) -> bool:
+        """Probe for ripgrep inside the container; result cached on the context.
+
+        The probe runs once per InstanceContainer lifetime — the second
+        call reads the cached boolean and skips the roundtrip. We reuse
+        the ``context.env`` dict to stash the probe result by the key
+        ``_PARE_HAS_RG`` since ``ToolContext`` has no scratch field and
+        the env dict is already per-session.
+        """
+        cached = context.env.get("_PARE_HAS_RG")
+        if cached is not None:
+            return cached == "1"
+        r = await context.container.exec("command -v rg", timeout=10.0)
+        has = r.exit_code == 0 and bool(r.stdout.strip())
+        context.env["_PARE_HAS_RG"] = "1" if has else "0"
+        return has
+
+    async def _search_ripgrep_in_container(
+        self,
+        pattern: str,
+        abs_path: str,
+        file_glob: str | None,
+        max_results: int,
+        context: ToolContext,
+    ) -> ToolResult:
+        cmd = [
+            "rg",
+            "--line-number",
+            "--no-heading",
+            "--color=never",
+            f"--max-count={max_results}",
+        ]
+        if file_glob:
+            cmd.extend(["--glob", file_glob])
+        for skip in (".git", "node_modules", "__pycache__", ".venv", "venv"):
+            cmd.extend(["--glob", f"!{skip}"])
+        cmd.extend(["--", pattern, abs_path])
+
+        r = await context.container.exec(cmd, timeout=30.0)
+        if r.timed_out:
+            return ToolResult(success=False, output="", error="Search timed out after 30s")
+        if r.exit_code == 1:
+            return ToolResult(
+                success=True,
+                output="No matches found.",
+                metadata={"match_count": 0},
+            )
+        if r.exit_code not in (0, 1):
+            return ToolResult(
+                success=False,
+                output="",
+                error=f"ripgrep error: {r.stderr.strip() or 'exit=' + str(r.exit_code)}",
+            )
+        return self._format_grep_output(r.stdout, max_results)
+
+    async def _search_grep_in_container(
+        self,
+        pattern: str,
+        abs_path: str,
+        file_glob: str | None,
+        max_results: int,
+        context: ToolContext,
+    ) -> ToolResult:
+        """``grep -rn`` fallback for images without ripgrep.
+
+        Build: ``grep -rnE <pattern> <path> --include=<glob>
+        --exclude-dir={.git,node_modules,__pycache__,.venv,venv}``. Pipe
+        through ``head -n`` for max_results trimming. grep's exit codes:
+        0 = matches found, 1 = none, >=2 = error.
+        """
+        import shlex
+
+        parts = [
+            "grep", "-rnE",
+        ]
+        for skip in (".git", "node_modules", "__pycache__", ".venv", "venv"):
+            parts.append(f"--exclude-dir={skip}")
+        if file_glob:
+            parts.append(f"--include={file_glob}")
+        parts.extend(["--", pattern, abs_path])
+        cmd = " ".join(shlex.quote(p) for p in parts) + f" | head -n {int(max_results) + 1}"
+
+        r = await context.container.exec(cmd, timeout=30.0)
+        if r.timed_out:
+            return ToolResult(success=False, output="", error="Search timed out after 30s")
+        # When `head` cuts off grep early, grep sometimes exits non-zero
+        # because of SIGPIPE. Treat empty output with non-zero as "no
+        # matches" only when stderr is clean.
+        if not r.stdout.strip() and r.exit_code not in (0, 1, 141):
+            return ToolResult(
+                success=False,
+                output="",
+                error=f"grep error: {r.stderr.strip() or 'exit=' + str(r.exit_code)}",
+            )
+        if not r.stdout.strip():
+            return ToolResult(
+                success=True,
+                output="No matches found.",
+                metadata={"match_count": 0},
+            )
+        return self._format_grep_output(r.stdout, max_results)
+
+    @staticmethod
+    def _format_grep_output(raw: str, max_results: int) -> ToolResult:
+        lines = [ln for ln in raw.splitlines() if ln]
+        match_count = len(lines)
+        if match_count > max_results:
+            lines = lines[:max_results]
+            output = "\n".join(lines) + (
+                f"\n\n[{match_count - max_results} more matches truncated]"
+            )
+        else:
+            output = "\n".join(lines)
+        return ToolResult(
+            success=True,
+            output=f"{min(match_count, max_results)} matches:\n{output}",
+            metadata={"match_count": min(match_count, max_results)},
         )
