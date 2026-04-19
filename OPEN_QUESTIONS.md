@@ -12,14 +12,15 @@ Before proceeding with the full implementation of the Multiverse Engine (Phase 3
 
 ## Pare 2.0 & Next-Gen AgentOps Infrastructure (Future Vision)
 
-To address the inherent non-determinism of LLM agents, we need to move beyond traditional software engineering paradigms (like standard Git) and build infrastructure explicitly designed for probabilistic systems.
+## Pare 2.0: The Opinionated Coding Agent Layer (Future Vision)
 
-* **1. Evaluation-Driven Version Control:** 
-  * *Problem:* Traditional Git tracks text diffs, but in agent development, a 3-word prompt change can alter system behavior drastically and unpredictably across the entire codebase.
-  * *Idea:* Version control must track performance tuples: `(Prompt/System_Diff, Execution_Trace, Evaluation_Pass_Rate)`. We need a mechanism to rollback not just code, but to the semantic baseline that yielded the highest pass rate on the DiffVerify harness. Prompt changes should be gated by statistical confidence.
-* **2. Event Sourcing & Trajectory Replay (Time-Travel Debugging):**
-  * *Problem:* When an agent hallucinates or creates a destructive patch, the bug is often impossible to reproduce due to model temperature and non-determinism.
-  * *Idea:* Treat every agent step as an immutable event. Record the full `[Observation -> Thought -> Action -> Environment_State]` trajectory. This enables "time-travel debugging" where developers can replay the exact context window that led to a failure, fork the trajectory at the exact point of hallucination, and test if a new guardrail prevents it.
-* **3. Causal DAG (Directed Acyclic Graph) Context Tracking:**
-  * *Problem:* The linear nature of LLM chat limits reasoning. When an agent goes down a rabbit hole (e.g., in Eureka Broadcast), the failed thoughts remain in the context window, causing "Hallucination Contagion" and wasting tokens.
-  * *Idea:* Upgrade the agent's working memory from a linear thread to a Causal DAG. Each thought/action is a node. If an exploration branch hits a dead end (e.g., a test fails), we can structurally prune that entire branch (and all its downstream context) from the active window, cleanly backtracking without poisoning future reasoning. Context becomes a "search tree" rather than a "chat log".
+Rather than building a "universal AgentOps platform" from scratch, Pare 2.0 is envisioned as an **opinionated, coding-agent-specific layer built on top of modern observability infrastructure (like Langfuse)**. It bridges the gap between generic LLM tracing and the specialized needs of autonomous software repair.
+
+* **1. Eval-Gated Prompt CI (via Langfuse & DiffVerify):** 
+  * *Repositioning:* Instead of building a new "Evaluation-Driven Version Control" system from scratch, Pare 2.0 will utilize native Langfuse CI webhooks and prompt management. We will stitch together Langfuse's staging/production labeling with Pare's `DiffVerify` harness. Prompt upgrades will only be promoted if they pass coding-agent specific sandboxed test suites (e.g., SWE-bench FAIL_TO_PASS rules).
+* **2. Coding-Agent-Aware Trajectory Inspector (Product Focus):**
+  * *Repositioning:* Generic trace visualizers (like Langfuse's waterfall or vanilla Agent Graph) do not understand SWE-bench fault taxonomies. Pare will act as a specialized lens that ingests standard trace events and answers: *"What category of coding failure is this?"* and *"Where did the failed trajectory diverge from the successful one?"* This provides a domain-specific Diff View for agent runs.
+* **3. Causal DAG Runtime Context & Upstream Contributions:**
+  * *Problem:* Linear chat histories poison the agent's context window with failed experiments (Hallucination Contagion).
+  * *Idea:* Upgrade the active agent runtime to use a Causal DAG, structurally pruning dead-end branches.
+  * *Open Source Strategy:* This runtime feature exposes a gap in current observability tools. We will use this to drive upstream contributions (e.g., proposing `metadata.agent_status = dead_end` semantics to Langfuse's Agent Graph) to visually de-emphasize pruned exploration branches, creating high-signal OSS impact without reinventing the backend.
