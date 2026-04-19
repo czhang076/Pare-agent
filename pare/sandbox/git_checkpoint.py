@@ -26,6 +26,19 @@ logger = logging.getLogger(__name__)
 # Git binary — can be overridden for tests
 _GIT = "git"
 
+# Pathspec exclusions appended to `git diff` calls. pytest regenerates
+# .pyc files during tool-call iterations; if those land in final_diff the
+# SWE-bench harness's `patch` fallback chokes on binary hunks before
+# reaching the real .py edits.
+_DIFF_EXCLUDES: tuple[str, ...] = (
+    "--",
+    ":(exclude,glob)**/__pycache__/**",
+    ":(exclude,glob)**/*.pyc",
+    ":(exclude,glob)**/*.pyo",
+    ":(exclude,glob)**/*.pyd",
+    ":(exclude,glob).pare/**",
+)
+
 
 @dataclass
 class CheckpointInfo:
@@ -161,7 +174,7 @@ class GitCheckpoint:
         self._require_active()
         base = sha or self._original_branch
         try:
-            return await self._run("diff", "--stat", base, "HEAD")
+            return await self._run("diff", "--stat", base, "HEAD", *_DIFF_EXCLUDES)
         except GitCheckpointError:
             return ""
 
@@ -170,7 +183,7 @@ class GitCheckpoint:
         self._require_active()
         base = sha or self._original_branch
         try:
-            return await self._run("diff", base, "HEAD")
+            return await self._run("diff", base, "HEAD", *_DIFF_EXCLUDES)
         except GitCheckpointError:
             return ""
 

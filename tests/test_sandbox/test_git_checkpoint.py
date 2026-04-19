@@ -216,6 +216,32 @@ class TestDiff:
         diff = await cp.get_diff_since()
         assert diff.strip() == ""
 
+    @pytest.mark.asyncio
+    async def test_full_diff_excludes_pycache_and_pyc(
+        self, cp: GitCheckpoint, repo: Path
+    ):
+        """pytest regenerates .pyc files during tool calls — they must not
+        reach the SWE-bench harness or `patch` chokes on binary hunks
+        before applying the real .py edits.
+        """
+        await cp.setup()
+
+        (repo / "real.py").write_text("print('x')\n")
+        pycache = repo / "__pycache__"
+        pycache.mkdir(exist_ok=True)
+        (pycache / "real.cpython-312.pyc").write_bytes(b"\x00\x01fakebytes\x02")
+        nested = repo / "pkg" / "__pycache__"
+        nested.mkdir(parents=True, exist_ok=True)
+        (nested / "mod.cpython-312.pyc").write_bytes(b"\x03morebytes")
+        (repo / "stray.pyc").write_bytes(b"\x04")
+
+        await cp.checkpoint("mixed real + pyc changes")
+
+        full = await cp.get_full_diff()
+        assert "real.py" in full
+        assert "__pycache__" not in full
+        assert ".pyc" not in full
+
 
 class TestFinalize:
     @pytest.mark.asyncio
