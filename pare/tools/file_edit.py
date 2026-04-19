@@ -23,6 +23,7 @@ from pare.tools.base import (
     Tool,
     ToolContext,
     ToolResult,
+    validate_workspace_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -70,6 +71,10 @@ class FileEditTool(Tool):
             return ToolResult(success=False, output="", error="old_str is required")
         if old_str == new_str:
             return ToolResult(success=False, output="", error="old_str and new_str are identical")
+
+        forbidden = validate_workspace_path(file_path_str)
+        if forbidden:
+            return ToolResult(success=False, output="", error=forbidden)
 
         file_path = (context.cwd / file_path_str).resolve()
 
@@ -265,6 +270,10 @@ class FileCreateTool(Tool):
 
         if not file_path_str:
             return ToolResult(success=False, output="", error="file_path is required")
+
+        forbidden = validate_workspace_path(file_path_str)
+        if forbidden:
+            return ToolResult(success=False, output="", error=forbidden)
 
         file_path = (context.cwd / file_path_str).resolve()
 

@@ -16,6 +16,7 @@ from pare.tools.base import (
     Tool,
     ToolContext,
     ToolResult,
+    validate_workspace_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,10 @@ class FileReadTool(Tool):
         file_path_str = params.get("file_path", "")
         if not file_path_str:
             return ToolResult(success=False, output="", error="file_path is required")
+
+        forbidden = validate_workspace_path(file_path_str)
+        if forbidden:
+            return ToolResult(success=False, output="", error=forbidden)
 
         # Resolve relative to working directory
         file_path = (context.cwd / file_path_str).resolve()

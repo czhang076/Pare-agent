@@ -205,6 +205,18 @@ class ReActExecutor:
                     tool_call_events=recorded_events,
                 )
 
+            # Advisory injection — soft nudge when the agent drifts (e.g.
+            # 10+ tool calls with no edits). Runs once per cooldown window
+            # and is recorded to telemetry so we can audit whether it fires
+            # on the right trajectories.
+            nudge = self.guardrails.advisory()
+            if nudge:
+                self._log("guardrail_advisory", message=nudge)
+                # role="user" (not "system") — matches the existing Tier-1
+                # diff-check nudge below and works across every adapter
+                # without relying on mid-conversation system-message support.
+                conversation.append(Message(role="user", content=nudge))
+
             # Call LLM
             self._log("llm_request", message_count=len(conversation))
             start_time = time.time()

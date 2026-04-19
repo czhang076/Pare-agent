@@ -10,7 +10,8 @@ The pipeline is ordered from cheapest to most aggressive:
     Stage 2: strip markdown fences — handles ```json ... ```
     Stage 3: brace extraction — finds first { and last }
     Stage 4: light sanitization — trailing commas, single quotes
-    Stage 5: raise ParseError with raw content for caller to handle
+    Stage 5: json_repair fallback — truncated braces, unquoted keys, etc.
+    Stage 6: raise ParseError with raw content for caller to handle
 
 The caller (e.g. planner.py) can then decide whether to retry by feeding
 the error back to the LLM.
@@ -175,6 +176,27 @@ def parse_json_response(raw: str) -> dict:
             if isinstance(result, dict):
                 return result
         except (json.JSONDecodeError, ValueError):
+            pass
+
+    # Stage 5: json_repair — handles truncated JSON (unclosed braces),
+    # unquoted keys, single quotes, and bare literals. Imported lazily so
+    # a dev install without the package still parses strict JSON; if the
+    # import fails we simply skip the stage.
+    stages_tried.append("json_repair")
+    try:
+        from json_repair import repair_json  # type: ignore[import-untyped]
+    except ImportError:
+        repair_json = None  # type: ignore[assignment]
+    if repair_json is not None:
+        # json_repair takes the raw string (not the brace-extracted slice) so
+        # it gets the full picture and can decide where the real JSON starts.
+        try:
+            repaired = repair_json(raw, return_objects=False)
+            if repaired and repaired not in ('""', "null"):
+                result = json.loads(repaired)
+                if isinstance(result, dict):
+                    return result
+        except (json.JSONDecodeError, ValueError, TypeError):
             pass
 
     # All stages failed

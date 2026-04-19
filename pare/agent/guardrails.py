@@ -31,6 +31,12 @@ class GuardrailConfig:
     max_consecutive_errors: int = 3    # Errors in a row before forcing stop
     max_repeated_actions: int = 2      # Same tool+params before warning
     max_file_changes_per_step: int = 10  # Unique files edited per step
+    # Advisory thresholds (soft nudges, not blocks). See Guardrails.advisory().
+    nudge_no_edit_after_n_calls: int = 8  # Remind to edit if no file_edit after N total calls
+    # Re-fire cadence for each advisory kind — advisory is suppressed for
+    # this many additional calls after a fire, so we don't spam the model
+    # every single turn once the condition stays true.
+    advisory_cooldown_calls: int = 5
 
 
 @dataclass(slots=True)
@@ -43,6 +49,10 @@ class GuardrailState:
     action_hashes: dict[str, int] = field(default_factory=dict)  # hash -> count
     read_files: set[str] = field(default_factory=set)  # files read in current step
     edited_files: set[str] = field(default_factory=set)  # files edited in current step
+    total_edits: int = 0  # successful file_edit/file_create count over the whole session
+    # Per-advisory bookkeeping: advisory-name -> total_tool_calls at last fire.
+    # Used to enforce ``advisory_cooldown_calls``.
+    last_advisory_at: dict[str, int] = field(default_factory=dict)
 
     def reset_step(self) -> None:
         """Reset per-step counters (called at the start of each plan step).
@@ -63,6 +73,8 @@ class GuardrailState:
         self.action_hashes.clear()
         self.read_files.clear()
         self.edited_files.clear()
+        self.total_edits = 0
+        self.last_advisory_at.clear()
 
 
 def _hash_action(tool_name: str, params: dict) -> str:
@@ -175,6 +187,38 @@ class Guardrails:
             file_path = params.get("file_path", "")
             if file_path:
                 self.state.edited_files.add(file_path)
+            self.state.total_edits += 1
+
+    def advisory(self) -> str | None:
+        """Return a soft nudge (system-side) based on current state, or ``None``.
+
+        Unlike :meth:`check`, this does not block the next tool call — it's
+        meant to be injected as a transient system message *before* the next
+        LLM turn. Mirrors mini-SWE-agent's dynamic-prompt pattern: the state
+        machine stays flat, but the model gets a targeted reminder when it
+        drifts (e.g. keeps reading for 10 turns without editing).
+
+        Each advisory kind is rate-limited via ``advisory_cooldown_calls`` so
+        the model isn't re-pinged every single turn once the condition stays
+        true — we fire, wait, and let the model respond.
+        """
+        s = self.state
+        cfg = self.config
+
+        # Kind: "no_edit_yet" — too many tool calls and still zero edits.
+        if s.total_edits == 0 and s.total_tool_calls >= cfg.nudge_no_edit_after_n_calls:
+            last = s.last_advisory_at.get("no_edit_yet", -10_000)
+            if s.total_tool_calls - last >= cfg.advisory_cooldown_calls:
+                s.last_advisory_at["no_edit_yet"] = s.total_tool_calls
+                return (
+                    f"Advisory: you have made {s.total_tool_calls} tool calls "
+                    "without editing any file. Either (a) call `file_edit` / "
+                    "`file_create` now with your best current hypothesis, or "
+                    "(b) state explicitly why the task cannot be addressed by "
+                    "a code change and stop. Do not continue reading."
+                )
+
+        return None
 
     def reset_step(self) -> None:
         """Reset per-step state (call at the start of each plan step)."""

@@ -30,6 +30,77 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Resource validator — single choke point for "do not touch" paths
+# ---------------------------------------------------------------------------
+#
+# File tools (file_read, file_edit, file_create) all ask this validator
+# before touching disk. Adding a new rule once here propagates to every
+# file tool — and spares us from scattering `if path.startswith(...)`
+# across the codebase.
+#
+# What to block and why:
+# - ``.pare/`` — Pare's own bookkeeping (MEMORY.md, history.jsonl). The
+#   agent has no reason to edit these, and they don't exist inside the
+#   SWE-bench docker image, so edits that leak into ``final_diff`` crash
+#   the harness's ``git apply`` step.
+# - ``__pycache__/`` and ``*.pyc``/``*.pyo``/``*.pyd`` — compiled bytecode,
+#   edited only by accident after a search match on a decompiled line.
+#   Binary files break the patch-apply fallback chain.
+# - ``.git/`` — VCS internals. Edits here are always accidental.
+#
+# This is intentionally conservative: file_read is allowed on anything the
+# validator permits, so if we're too strict we'll know fast. Expand rather
+# than loosen.
+
+_FORBIDDEN_PATH_PREFIXES: tuple[str, ...] = (
+    ".pare/",
+    "__pycache__/",
+    ".git/",
+)
+_FORBIDDEN_PATH_SEGMENTS: tuple[str, ...] = (
+    "/__pycache__/",
+    "/.pare/",
+    "/.git/",
+)
+_FORBIDDEN_PATH_SUFFIXES: tuple[str, ...] = (
+    ".pyc",
+    ".pyo",
+    ".pyd",
+)
+
+
+def validate_workspace_path(path: str) -> str | None:
+    """Return an error message if ``path`` is off-limits, else ``None``.
+
+    Normalizes Windows-style separators and leading ``./`` so the rules
+    catch both ``.pare/MEMORY.md`` and ``./.pare\\MEMORY.md``. Does not
+    touch the filesystem — purely a string check.
+    """
+    if not path:
+        return None
+    norm = path.replace("\\", "/")
+    while norm.startswith("./"):
+        norm = norm[2:]
+    lowered = norm.lower()
+    if any(lowered.startswith(p) for p in _FORBIDDEN_PATH_PREFIXES):
+        return (
+            f"Refusing to touch '{path}': path is under Pare-internal / VCS / "
+            "bytecode bookkeeping. Edit the real source file instead."
+        )
+    if any(seg in lowered for seg in _FORBIDDEN_PATH_SEGMENTS):
+        return (
+            f"Refusing to touch '{path}': path is under Pare-internal / VCS / "
+            "bytecode bookkeeping. Edit the real source file instead."
+        )
+    if any(lowered.endswith(s) for s in _FORBIDDEN_PATH_SUFFIXES):
+        return (
+            f"Refusing to touch '{path}': compiled Python bytecode. "
+            "Edit the .py source file; the interpreter regenerates the cache."
+        )
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
 

@@ -180,3 +180,69 @@ class TestResetStep:
         assert len(guard.state.read_files) == 0
         assert len(guard.state.edited_files) == 0
         assert len(guard.state.action_hashes) == 0
+
+
+class TestAdvisory:
+    """Soft-nudge advisories — do NOT block, but return a message to inject."""
+
+    def _simulate_reads(self, guard: Guardrails, n: int) -> None:
+        """Simulate ``n`` successful read-only calls (no edits)."""
+        for i in range(n):
+            guard.record_call("bash", {"command": f"ls -{i}"})
+            guard.record_result("bash", {"command": f"ls -{i}"}, success=True)
+
+    def test_no_advisory_under_threshold(self):
+        guard = Guardrails(GuardrailConfig(nudge_no_edit_after_n_calls=8))
+        self._simulate_reads(guard, 5)
+        assert guard.advisory() is None
+
+    def test_no_edit_advisory_fires_after_threshold(self):
+        guard = Guardrails(GuardrailConfig(nudge_no_edit_after_n_calls=8))
+        self._simulate_reads(guard, 8)
+        msg = guard.advisory()
+        assert msg is not None
+        assert "file_edit" in msg
+
+    def test_no_edit_advisory_suppressed_after_first_edit(self):
+        guard = Guardrails(GuardrailConfig(nudge_no_edit_after_n_calls=8))
+        self._simulate_reads(guard, 7)
+        # One real edit succeeds → the advisory must NOT fire even though
+        # total_tool_calls keeps growing past the threshold.
+        guard.record_call("file_edit", {"file_path": "x.py"})
+        guard.state.read_files.add("x.py")  # satisfy read-before-write bookkeeping
+        guard.record_result("file_edit", {"file_path": "x.py"}, success=True)
+        self._simulate_reads(guard, 5)
+        assert guard.advisory() is None
+
+    def test_no_edit_advisory_cooldown(self):
+        guard = Guardrails(
+            GuardrailConfig(nudge_no_edit_after_n_calls=5, advisory_cooldown_calls=4)
+        )
+        self._simulate_reads(guard, 5)
+        first = guard.advisory()
+        assert first is not None
+        # Immediately polling again must NOT re-fire — cooldown active.
+        assert guard.advisory() is None
+        # After 4 more calls, cooldown elapses → fires again.
+        self._simulate_reads(guard, 4)
+        second = guard.advisory()
+        assert second is not None
+
+    def test_advisory_is_non_blocking(self):
+        """Advisory must NEVER return via check() — only via advisory()."""
+        guard = Guardrails(GuardrailConfig(nudge_no_edit_after_n_calls=1))
+        self._simulate_reads(guard, 3)
+        # check() should not surface the advisory.
+        assert guard.check("bash", {"command": "echo hi"}) is None
+        # But advisory() should.
+        assert guard.advisory() is not None
+
+    def test_reset_all_clears_advisory_state(self):
+        guard = Guardrails(GuardrailConfig(nudge_no_edit_after_n_calls=2))
+        self._simulate_reads(guard, 2)
+        assert guard.advisory() is not None  # fires and records
+        guard.state.reset_all()
+        # After reset, counters are zero → no advisory yet.
+        assert guard.advisory() is None
+        assert guard.state.total_edits == 0
+        assert guard.state.last_advisory_at == {}

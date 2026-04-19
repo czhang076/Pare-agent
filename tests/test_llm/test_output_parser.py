@@ -107,8 +107,9 @@ class TestParseFailure:
         assert "direct" in exc_info.value.stages_tried
         assert raw in exc_info.value.raw
 
-    def test_truncated_json(self):
-        raw = '{"summary": "this is truncated because max_tok'
+    def test_pure_prose_raises_parse_error(self):
+        """Input with no JSON-like structure at all still fails loudly."""
+        raw = "I don't know how to create a plan for this task."
         with pytest.raises(ParseError):
             parse_json_response(raw)
 
@@ -183,3 +184,32 @@ class TestRealWorldPatterns:
         )
         result = parse_json_response(raw)
         assert result["status"] == "completed"
+
+
+class TestJsonRepairFallback:
+    """Stage 5 — hand off to json_repair when brace extraction fails.
+
+    These inputs intentionally break earlier stages: truncated JSON, unquoted
+    keys, prose preamble with braces inside, single-quoted strings. json_repair
+    is the last line of defence before we raise ParseError.
+    """
+
+    def test_truncated_json_gets_repaired(self):
+        # Real-world Minimax failure: output cut off by max_tokens mid-object.
+        raw = '{"status": "in_progress", "summary": "Found the bug in '
+        result = parse_json_response(raw)
+        assert result["status"] == "in_progress"
+
+    def test_unquoted_keys_get_repaired(self):
+        raw = "{status: 'ok', count: 3}"
+        result = parse_json_response(raw)
+        assert result["status"] == "ok"
+        assert result["count"] == 3
+
+    def test_single_quoted_strings_get_repaired(self):
+        # A common Minimax / DeepSeek failure: Python-style single quotes
+        # instead of JSON double quotes.
+        raw = "{'status': 'in_progress', 'plan': ['step1', 'step2']}"
+        result = parse_json_response(raw)
+        assert result["status"] == "in_progress"
+        assert result["plan"] == ["step1", "step2"]

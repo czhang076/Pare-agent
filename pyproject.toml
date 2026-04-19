@@ -14,6 +14,11 @@ dependencies = [
 
     # Token counting (OpenAI models)
     "tiktoken>=0.7.0",
+
+    # Tolerant JSON parsing for LLM outputs — used as a last-resort stage
+    # by pare/llm/output_parser.py when models emit prose-wrapped or
+    # truncated JSON (common with Minimax / DeepSeek / Qwen).
+    "json-repair>=0.30",
 ]
 
 [project.optional-dependencies]
