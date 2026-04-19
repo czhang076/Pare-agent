@@ -1,0 +1,36 @@
+{# Trajectory Inspector report template — W2 Day 1-3 lands the real one. #}
+{# Layout reference: see plan.md §1.3 and the plan message in chat. #}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Pare Inspector — {{ report.title }}</title>
+  <style>{{ css }}</style>
+</head>
+<body>
+  <header>
+    <h1>{{ report.title }}</h1>
+    {# TODO W2: success/failure summary chips, tier2 badge #}
+  </header>
+
+  {% if report.divergence %}
+  <section class="divergence">
+    {# TODO W2: divergence summary box (kind, semantic tags, side-by-side step) #}
+  </section>
+  {% endif %}
+
+  {% if report.aligned %}
+  <section class="timeline">
+    {# TODO W2: side-by-side aligned timeline table, highlighting divergence #}
+  </section>
+  {% else %}
+  <section class="single-timeline">
+    {# TODO W1: single-trajectory tool-call timeline #}
+  </section>
+  {% endif %}
+
+  <section class="details">
+    {# TODO W2: collapsible per-step expanded views (params, output, error_signal) #}
+  </section>
+</body>
+</html>
