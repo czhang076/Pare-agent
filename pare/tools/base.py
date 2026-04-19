@@ -370,6 +370,7 @@ def create_default_registry() -> ToolRegistry:
     startup fast when not all tools are needed.
     """
     from pare.tools.bash import BashTool
+    from pare.tools.declare_done import DeclareDoneTool
     from pare.tools.file_edit import FileCreateTool, FileEditTool
     from pare.tools.file_read import FileReadTool
     from pare.tools.search import SearchTool
@@ -380,4 +381,5 @@ def create_default_registry() -> ToolRegistry:
     registry.register(FileEditTool())
     registry.register(FileCreateTool())
     registry.register(SearchTool())
+    registry.register(DeclareDoneTool())
     return registry

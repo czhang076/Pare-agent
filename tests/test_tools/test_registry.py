@@ -202,4 +202,5 @@ class TestCreateDefaultRegistry:
         assert "file_edit" in registry
         assert "file_create" in registry
         assert "search" in registry
-        assert len(registry) == 5
+        assert "declare_done" in registry
+        assert len(registry) == 6

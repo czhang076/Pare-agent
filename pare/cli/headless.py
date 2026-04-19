@@ -129,6 +129,12 @@ def _build_trajectory_record(
         metadata["tier2_output"] = result.tier2_output
     if final_diff:
         metadata["final_diff"] = final_diff
+    # Structured self-claim from declare_done. Empty ``declared_status``
+    # means the agent ended silently — that is itself a Module A/B signal
+    # ("gave up without declaring"), so we record it explicitly.
+    metadata["declared_status"] = result.declared_status
+    if result.declared_summary:
+        metadata["declared_summary"] = result.declared_summary
 
     return TrajectoryRecord(
         schema_version=SCHEMA_VERSION,

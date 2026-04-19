@@ -72,7 +72,7 @@ class ExecutionResult:
     output: str
     messages: list[Message]
     tool_call_count: int = 0
-    stop_reason: str = "end_turn"  # end_turn | budget_exhausted | error | max_tokens
+    stop_reason: str = "end_turn"  # end_turn | budget_exhausted | error | max_tokens | declared_done
     total_usage: TokenUsage = field(default_factory=lambda: TokenUsage(input_tokens=0, output_tokens=0))
     tier1_pass: bool = True
     tier2_enabled: bool = False
@@ -84,6 +84,13 @@ class ExecutionResult:
     llm_claimed_success: bool = False
     attempts: list[dict] = field(default_factory=list)
     tool_call_events: list[TrajectoryToolCallEvent] = field(default_factory=list)
+    # Structured self-claim from the declare_done tool. ``declared_status``
+    # is one of {"fixed", "cannot_fix", "need_info", ""}; empty string means
+    # the agent ended without declaring (silent stop or budget exhaustion).
+    # This is the authoritative source for Module B's tier1 self-claim —
+    # prefer it over the heuristic ``llm_claimed_success`` flag.
+    declared_status: str = ""
+    declared_summary: str = ""
 
 
 @dataclass(slots=True)
@@ -177,6 +184,12 @@ class ReActExecutor:
         recorded_events: list[TrajectoryToolCallEvent] = []
         global_call_index = 0
         turn_id = 0
+
+        # Structured self-claim set by the declare_done tool (if called).
+        # Empty string = agent ended without declaring (silent stop /
+        # budget exhaust / error). Non-empty = authoritative self-claim.
+        declared_status = ""
+        declared_summary = ""
 
         while True:
             # Check per-step iteration limit (from planner budget)
@@ -381,6 +394,13 @@ class ReActExecutor:
 
                 self.guardrails.record_result(tc.name, tc.arguments, result.success)
 
+                # Capture structured self-claim. We don't break here — still
+                # record the tool_result so the trajectory is consistent,
+                # then exit the outer loop after this turn finishes.
+                if tc.name == "declare_done" and result.success:
+                    declared_status = str(result.metadata.get("status", ""))
+                    declared_summary = str(result.metadata.get("summary", ""))
+
                 event.result = result
                 event.duration = time.time() - start_time
                 if on_tool_call:
@@ -448,6 +468,26 @@ class ReActExecutor:
 
             # Add tool results to conversation
             conversation.append(Message(role="tool_result", content=result_blocks))
+
+            # Structured exit via declare_done — authoritative over the
+            # silent "LLM stopped calling tools" signal. ``success`` is True
+            # for "fixed" (the agent believes the edits resolve the task) and
+            # False for "cannot_fix" / "need_info" so downstream can filter
+            # give-ups from claimed wins without parsing the status string.
+            if declared_status:
+                return ExecutionResult(
+                    success=(declared_status == "fixed"),
+                    output=final_text,
+                    messages=conversation,
+                    tool_call_count=total_calls,
+                    stop_reason="declared_done",
+                    total_usage=total_usage,
+                    tier1_pass=tier1_pass,
+                    llm_claimed_success=(declared_status == "fixed"),
+                    declared_status=declared_status,
+                    declared_summary=declared_summary,
+                    tool_call_events=recorded_events,
+                )
 
     async def _stream_response(
         self,

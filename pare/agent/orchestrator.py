@@ -52,15 +52,20 @@ file before calling file_edit on it.
 refactor surrounding code unless asked.
 - After making changes, verify them (e.g., run tests if available).
 - If you are unsure about something, search the codebase first.
-- When you are done, explain what you changed and why.
-- If you cannot complete the task, explain what you tried and what blocked you.
+- When you are finished, call the `declare_done` tool exactly once with \
+status='fixed' (you believe your edits resolve the task), 'cannot_fix' \
+(this is not addressable by a code change, or you failed to localize \
+within budget), or 'need_info' (user clarification required). Simply \
+stopping without calling `declare_done` is treated as a silent give-up \
+and is indistinguishable from failure — always declare.
 - Do NOT output text saying what you plan to do and then stop. Either \
-do it (call tools) or explain why you cannot.
+do it (call tools) or call `declare_done` with status='cannot_fix' and \
+explain in the summary.
 
 ## Available Tools
 You have access to tools for: running shell commands (bash), reading files \
 (file_read), editing files (file_edit), creating new files (file_create), \
-and searching code (search).
+searching code (search), and declaring completion (declare_done).
 """
 
 
