@@ -23,7 +23,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.0",
+    # Pin pytest<9: pytest 9.x raises PytestRemovedIn9Warning for async fixtures
+    # without an explicit loop-scope policy, which breaks pytest-asyncio<0.25.
+    "pytest>=8.0,<9",
     "pytest-asyncio>=0.24",
     "pytest-mock>=3.14",
     "ruff>=0.8",
@@ -51,6 +53,11 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "A", "SIM", "TCH"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Explicit loop-scope policy silences PytestRemovedIn9Warning under
+# pytest-asyncio 0.24+ so the suite runs clean on Linux where CI picks
+# up a newer pytest than Windows dev boxes.
+asyncio_default_fixture_loop_scope = "function"
+asyncio_default_test_loop_scope = "function"
 testpaths = ["tests"]
 filterwarnings = [
     # v1 trajectory modules are intentionally deprecated (Phase 2.6);
