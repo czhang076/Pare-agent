@@ -17,7 +17,11 @@ import sys
 if __package__ in (None, ""):
     sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from pare.cli.headless import run_headless
+from pare.cli.headless import (
+    _flat_react_requested,
+    run_headless,
+    run_headless_flat_react,
+)
 
 
 def _resolve_tier2_command(template: str | None, python_bin: str) -> str | None:
@@ -144,6 +148,39 @@ def build_parser() -> argparse.ArgumentParser:
         default="pare_v6",
         help="model_name_or_path recorded in harness predictions (default: pare_v6).",
     )
+    parser.add_argument(
+        "--loop",
+        choices=["new", "legacy"],
+        default=None,
+        help=(
+            "Which agent loop to drive per instance. 'new' → flat ReAct + "
+            "long-lived InstanceContainer (R3). 'legacy' → 3-layer orchestrator. "
+            "Default reads PARE_USE_NEW_LOOP env. R4 flips default to 'new'. "
+            "In 'new' mode, --tier2-mode and --test-command are ignored — "
+            "tier2 is optional and controlled by --verify."
+        ),
+    )
+    parser.add_argument(
+        "--dataset",
+        default="princeton-nlp/SWE-bench_Verified",
+        help="Dataset name for --loop new (default: SWE-bench_Verified).",
+    )
+    parser.add_argument(
+        "--split",
+        default="test",
+        help="Dataset split for --loop new (default: test).",
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=50,
+        help="Max LLM turns for --loop new (default: 50).",
+    )
+    parser.add_argument(
+        "--verify",
+        action="store_true",
+        help="--loop new: run Tier-2 verification inside the same container.",
+    )
     return parser
 
 
@@ -238,6 +275,11 @@ async def generate_trajectories(
     tier2_docker_run_id: str | None = None,
     tier2_docker_timeout: int = 1800,
     tier2_docker_model_name: str = "pare_v6",
+    loop_mode: str | None = None,
+    dataset_name: str = "princeton-nlp/SWE-bench_Verified",
+    split: str = "test",
+    max_steps: int = 50,
+    verify: bool = False,
 ) -> GenerationReport:
     if not tasks:
         raise GenerationError("tasks list is empty")
@@ -245,6 +287,7 @@ async def generate_trajectories(
     run_seeds = seeds or [0]
     selected_tasks = tasks[:max_instances] if max_instances is not None else list(tasks)
     python_bin = tier2_python or sys.executable
+    use_flat_react = _flat_react_requested(loop_mode)
 
     runs_requested = len(selected_tasks) * len(run_seeds)
     runs_completed = 0
@@ -289,26 +332,44 @@ async def generate_trajectories(
                 run_test_command = None
 
             for seed in run_seeds:
-                exit_code = await run_headless(
-                    task=task.task,
-                    provider=provider,
-                    model=model,
-                    api_key=api_key,
-                    base_url=base_url,
-                    cwd=run_cwd,
-                    output_path=None,
-                    trajectory_path=trajectory_jsonl,
-                    instance_id=task.instance_id,
-                    seed=seed,
-                    test_command=run_test_command,
-                    test_timeout=test_timeout,
-                    use_planning=use_planning,
-                    max_tool_calls=max_tool_calls,
-                    max_tool_calls_per_step=max_tool_calls_per_step,
-                    tier2_mode=tier2_mode,
-                    tier2_verifier=tier2_verifier,
-                    verbose=False,
-                )
+                if use_flat_react:
+                    exit_code = await run_headless_flat_react(
+                        task=task.task,
+                        provider=provider,
+                        model=model,
+                        api_key=api_key,
+                        base_url=base_url,
+                        output_path=None,
+                        trajectory_path=trajectory_jsonl,
+                        instance_id=task.instance_id,
+                        dataset_name=dataset_name,
+                        split=split,
+                        seed=seed,
+                        max_steps=max_steps,
+                        verify=verify,
+                        verbose=False,
+                    )
+                else:
+                    exit_code = await run_headless(
+                        task=task.task,
+                        provider=provider,
+                        model=model,
+                        api_key=api_key,
+                        base_url=base_url,
+                        cwd=run_cwd,
+                        output_path=None,
+                        trajectory_path=trajectory_jsonl,
+                        instance_id=task.instance_id,
+                        seed=seed,
+                        test_command=run_test_command,
+                        test_timeout=test_timeout,
+                        use_planning=use_planning,
+                        max_tool_calls=max_tool_calls,
+                        max_tool_calls_per_step=max_tool_calls_per_step,
+                        tier2_mode=tier2_mode,
+                        tier2_verifier=tier2_verifier,
+                        verbose=False,
+                    )
 
                 if exit_code == 0:
                     runs_completed += 1
@@ -394,6 +455,11 @@ def main(argv: list[str] | None = None) -> int:
                 tier2_docker_run_id=args.tier2_docker_run_id,
                 tier2_docker_timeout=args.tier2_docker_timeout,
                 tier2_docker_model_name=args.tier2_docker_model_name,
+                loop_mode=args.loop,
+                dataset_name=args.dataset,
+                split=args.split,
+                max_steps=args.max_steps,
+                verify=args.verify,
             )
         )
     except Exception as e:
