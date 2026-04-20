@@ -1,15 +1,25 @@
-"""Trajectory data model and deterministic labeling utilities."""
+"""Trajectory data model and deterministic labeling utilities.
 
-from pare.trajectory.classifier import (
-    ClassificationResult,
-    TrajectoryClassifier,
-    TrajectoryLabel,
-)
-from pare.trajectory.recovery_detector import (
+Public surface after R5:
+
+- ``schema``        — v1 JSONL master + v2 ``tool_call_events`` extension.
+- ``schema_v2``     — ``ToolCallEvent``, ``ErrorSignal``, recovery/classification
+                      field definitions. Separate module because it can be
+                      consumed without the pre-v2 attempt-centric schema.
+- ``classifier_liu`` — Liu et al. (2025) 8-category classifier (core + extended).
+- ``recovery_detector_v2`` — ``RecoveryEvent`` / ``RecoveryLevel`` + detector.
+- ``error_signal_extractor`` — stdout/stderr → ``ErrorSignal`` classifier.
+
+The v1 ``classifier`` and ``recovery_detector`` modules were removed when
+the flat-ReAct refactor landed. The sampler owns its own label vocabulary
+in ``pare.curation.sampler`` now.
+"""
+
+from pare.trajectory.recovery_detector_v2 import (
+    RecoveryDetectionResult,
     RecoveryEvent,
     RecoveryLevel,
     detect_recovery_events,
-    highest_recovery_level,
 )
 from pare.trajectory.schema import (
     append_trajectory_jsonl,
@@ -24,10 +34,8 @@ from pare.trajectory.schema import (
 )
 
 __all__ = [
-    "ClassificationResult",
-    "TrajectoryClassifier",
-    "TrajectoryLabel",
     "append_trajectory_jsonl",
+    "RecoveryDetectionResult",
     "RecoveryEvent",
     "RecoveryLevel",
     "SCHEMA_VERSION",
@@ -37,7 +45,6 @@ __all__ = [
     "TrajectoryRecord",
     "VerificationResult",
     "detect_recovery_events",
-    "highest_recovery_level",
     "load_trajectory_jsonl",
     "write_trajectory_jsonl",
 ]

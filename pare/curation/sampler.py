@@ -7,20 +7,94 @@ Builds four SFT groups from classified trajectories:
 - unfiltered
 
 All groups are sampled to the same token budget (within tolerance).
+
+R5 state: auto-classification runs through ``classifier_liu`` +
+``error_signal_extractor`` + ``recovery_detector_v2`` (the Liu et al. 2025
+pipeline). The v1 classifier module has been deleted; the
+``TrajectoryLabel`` / ``ClassificationResult`` types that used to live
+there are now defined here because this sampler is their only consumer
+— they act as an output alphabet for group selection, not a pipeline
+stage. ``_map_outcome_to_label`` bridges Liu's ``OutcomeLabel`` back into
+that alphabet so the group-selection logic below stays untouched.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
 import random
 from typing import Sequence
 
-from pare.trajectory.classifier import (
-    ClassificationResult,
-    TrajectoryClassifier,
-    TrajectoryLabel,
+from pare.trajectory.classifier_liu import (
+    OutcomeLabel,
+    assign_outcome_label,
+    classify_liu_from_record,
+)
+from pare.trajectory.error_signal_extractor import (
+    classify_trajectory_signals,
+)
+from pare.trajectory.recovery_detector_v2 import (
+    RecoveryEvent,
+    RecoveryLevel,
+    detect_recovery_events,
 )
 from pare.trajectory.schema import TrajectoryRecord
+
+
+# ---------------------------------------------------------------------------
+# Label vocabulary for group selection (formerly in pare.trajectory.classifier;
+# moved here when that v1 module was deleted in R5). These types are *not*
+# re-exported to the public API — they exist solely to describe sampler
+# pools and to support precomputed-label callsites.
+# ---------------------------------------------------------------------------
+
+
+class TrajectoryLabel(str, Enum):
+    """Sampler pool labels. Mirrors the v1 classifier's enum verbatim."""
+
+    TOXIC = "toxic"
+    FAILED = "failed"
+    WEAKLY_VERIFIED = "weakly_verified"
+    FULLY_VERIFIED = "fully_verified"
+    ONE_SHOT_SUCCESS = "one_shot_success"
+    FAILURE_RECOVERY = "failure_recovery"
+
+
+@dataclass(slots=True)
+class ClassificationResult:
+    """Backward-compat shim for callers that precomputed v1 labels.
+
+    Only ``primary_label`` is consulted by the sampler; the other fields
+    exist so pre-R5 call sites using the old classifier keep type-checking.
+    """
+
+    primary_label: TrajectoryLabel
+    verification_label: TrajectoryLabel | None = None
+    recovery_level: RecoveryLevel | None = None
+    recovery_events: list[RecoveryEvent] = field(default_factory=list)
+    reasons: list[str] = field(default_factory=list)
+
+
+# v1 OutcomeLabel → v1 TrajectoryLabel mapping. Kept as a module-level
+# constant so it appears exactly once (single-source-of-truth for the
+# alignment between Liu et al. outcomes and the sampler's pool vocabulary).
+_OUTCOME_TO_V1_LABEL: dict[OutcomeLabel, TrajectoryLabel] = {
+    OutcomeLabel.TOXIC: TrajectoryLabel.TOXIC,
+    OutcomeLabel.FAILED: TrajectoryLabel.FAILED,
+    OutcomeLabel.WEAKLY_VERIFIED: TrajectoryLabel.WEAKLY_VERIFIED,
+    OutcomeLabel.VERIFIED_ONE_SHOT: TrajectoryLabel.ONE_SHOT_SUCCESS,
+    OutcomeLabel.VERIFIED_WITH_RECOVERY: TrajectoryLabel.FAILURE_RECOVERY,
+}
+
+
+def _map_outcome_to_label(outcome: OutcomeLabel) -> TrajectoryLabel:
+    """Translate a Liu v2 outcome into the v1 label the sampler pools on.
+
+    Raises KeyError on unknown values so any future addition to
+    ``OutcomeLabel`` forces an explicit audit here rather than silently
+    miscategorising trajectories.
+    """
+    return _OUTCOME_TO_V1_LABEL[outcome]
 
 
 class TokenBudgetSamplingError(ValueError):
@@ -194,16 +268,46 @@ class TokenBudgetSampler:
         trajectories: list[TrajectoryRecord],
         classifications: Sequence[ClassificationResult] | None,
     ) -> list[TrajectoryLabel]:
-        if classifications is None:
-            cls = TrajectoryClassifier().classify_many(trajectories)
-        else:
+        """Return one v1 ``TrajectoryLabel`` per trajectory.
+
+        Two supported input modes:
+
+        - ``classifications is None`` — auto-classify through the Liu v2
+          pipeline (``error_signal_extractor`` → ``classifier_liu`` →
+          ``recovery_detector_v2`` → ``assign_outcome_label``), then map
+          each ``OutcomeLabel`` down to the v1 pool label via
+          ``_map_outcome_to_label``. This is the path exercised by the R4+
+          flat-ReAct trajectory pipeline.
+        - ``classifications`` provided — legacy path. Use ``primary_label``
+          verbatim. Kept for backward compat with callers that already
+          computed labels against the v1 classifier; will be removed when
+          the v1 classifier itself is deleted (post-R5).
+        """
+        if classifications is not None:
             if len(classifications) != len(trajectories):
                 raise TokenBudgetSamplingError(
                     "classifications length must match trajectories length."
                 )
-            cls = list(classifications)
+            return [result.primary_label for result in classifications]
 
-        return [result.primary_label for result in cls]
+        labels: list[TrajectoryLabel] = []
+        for record in trajectories:
+            events = list(record.tool_call_events)
+            # If the record was loaded from a pre-v2 JSONL (no tool_call_events),
+            # classify_trajectory_signals returns an empty list; the Liu
+            # classifier degrades gracefully into "no signal → not toxic"
+            # which maps back onto v1 labels via verification fields alone.
+            signals = classify_trajectory_signals(events)
+            liu = classify_liu_from_record(record, signals)
+            # detect_recovery_events emits per-event ``RecoveryEvent``s; the
+            # v1 sampler only needs the boolean "contains any recovery",
+            # mirroring what the plan's draft used.
+            recovery_result = detect_recovery_events(events, signals)
+            outcome = assign_outcome_label(
+                liu, record.verification, recovery_result.contains_recovery
+            )
+            labels.append(_map_outcome_to_label(outcome))
+        return labels
 
     def _build_items(
         self,
