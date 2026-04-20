@@ -22,9 +22,12 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, TYPE_CHECKING
 
 from pare.llm.base import ToolSchema
+
+if TYPE_CHECKING:
+    from pare.sandbox.instance_container import InstanceContainer
 
 logger = logging.getLogger(__name__)
 
@@ -172,12 +175,24 @@ class ToolContext:
         confirmed_tools: Set of tool names the user has already confirmed
             (for CONFIRM_ONCE permission level).
         headless: If True, skip all confirmation prompts (SWE-bench mode).
+        container: Optional long-lived Docker container to route tool
+            execution through. When ``exec_target == "container"`` each
+            tool should dispatch to ``container.exec/read_file/write_file``
+            instead of touching the host filesystem. Default ``None``
+            keeps host-mode semantics unchanged for existing tests.
+        exec_target: Where tool side effects land. ``"container"`` is the
+            new default for the flat-ReAct loop (requires ``container``);
+            ``"host"`` retains legacy behaviour for unit tests and the
+            old orchestrator path until R4 flips the default and R5
+            deletes the legacy code.
     """
 
     cwd: Path
     env: dict[str, str] = field(default_factory=dict)
     confirmed_tools: set[str] = field(default_factory=set)
     headless: bool = False
+    container: "InstanceContainer | None" = None
+    exec_target: Literal["container", "host"] = "host"
 
 
 # ---------------------------------------------------------------------------

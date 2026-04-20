@@ -97,8 +97,19 @@ class DeclareDoneTool(Tool):
                 error="summary is required and must be non-empty.",
             )
 
+        clean_summary = summary.strip()
         return ToolResult(
             success=True,
-            output=f"Session ended with status={status}. Summary: {summary.strip()}",
-            metadata={"status": status, "summary": summary.strip()},
+            output=f"Session ended with status={status}. Summary: {clean_summary}",
+            # Two naming conventions kept in parallel:
+            # - status/summary: what the legacy executor.py reads (R5 delete);
+            # - declared_status/declared_summary: what the flat ReAct loop
+            #   reads in pare.agent.loop (R3). Shipping both avoids coupling
+            #   this tool's lifespan to R4's default-switch timing.
+            metadata={
+                "status": status,
+                "summary": clean_summary,
+                "declared_status": status,
+                "declared_summary": clean_summary,
+            },
         )

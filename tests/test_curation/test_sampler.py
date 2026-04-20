@@ -1,7 +1,21 @@
 """Tests for token-budget-matched sampler.
 
-Sampler currently depends on the deprecated v1 classifier; filter the
-DeprecationWarning so these tests don't noise up the output.
+Fixtures are tuned to the Liu v2 ``assign_outcome_label`` contract (post-R4
+sampler port):
+
+- ``VERIFIED_ONE_SHOT`` / ``VERIFIED_WITH_RECOVERY`` both require a
+  non-empty ``tier2_command`` AND ``tier1_pass=True``/``tier2_pass=True``;
+  that's why the default ``_record(tier2_command="pytest")`` is used for
+  the ``os-*`` / ``fr-*`` pools.
+- ``WEAKLY_VERIFIED`` is the Tier-2-not-configured branch, so ``wv-1``
+  explicitly sets ``tier2_command=""``.
+- The ``fr-*`` pool needs actually-detectable recovery in
+  ``tool_call_events`` — the sampler now delegates to
+  ``recovery_detector_v2``, which walks the event list rather than
+  ``StepAttempt`` retries.
+
+Deprecation filters on the removed v1 classifier modules are kept defensive
+until R5 deletes them.
 """
 
 from __future__ import annotations
@@ -20,6 +34,7 @@ from pare.trajectory.schema import (
     TrajectoryRecord,
     VerificationResult,
 )
+from pare.trajectory.schema_v2 import ToolCallEvent
 
 pytestmark = [
     pytest.mark.filterwarnings(
@@ -41,6 +56,8 @@ def _record(
     tier2_pass: bool,
     attempts: list[StepAttempt],
     tokens: int,
+    tier2_command: str = "pytest",
+    tool_call_events: list[ToolCallEvent] | None = None,
 ) -> TrajectoryRecord:
     return TrajectoryRecord(
         schema_version=SCHEMA_VERSION,
@@ -55,12 +72,44 @@ def _record(
             final_passed=final_passed,
             tier1_pass=tier1_pass,
             tier2_pass=tier2_pass,
-            tier2_command="",
+            tier2_command=tier2_command,
         ),
         attempts=attempts,
+        tool_call_events=list(tool_call_events or []),
         token_usage=TokenUsageSummary(input_tokens=tokens - 1, output_tokens=1),
         metadata={},
     )
+
+
+def _recovery_events() -> list[ToolCallEvent]:
+    """Build a minimal (error, correction) event pair.
+
+    Shape:
+      0: file_edit on a.py fails with a SyntaxError → error_signal=SYNTAX_ERROR
+      1: file_edit on a.py succeeds with different params → correction
+    Recovery detector returns L1 (same tool + same target, params differ).
+    """
+    err = ToolCallEvent.create(
+        turn_id=0,
+        call_index_in_turn=0,
+        global_index=0,
+        tool_name="file_edit",
+        params={"file_path": "a.py", "old_string": "x = 1", "new_string": "x ="},
+        result_success=False,
+        result_content="SyntaxError: invalid syntax (a.py, line 1)",
+        timestamp=1.0,
+    )
+    fix = ToolCallEvent.create(
+        turn_id=1,
+        call_index_in_turn=0,
+        global_index=1,
+        tool_name="file_edit",
+        params={"file_path": "a.py", "old_string": "x =", "new_string": "x = 2"},
+        result_success=True,
+        result_content="edit applied",
+        timestamp=2.0,
+    )
+    return [err, fix]
 
 
 def _one_shot_attempt(step: int = 1) -> list[StepAttempt]:
@@ -128,7 +177,7 @@ def _dataset() -> list[TrajectoryRecord]:
             attempts=_one_shot_attempt(),
             tokens=80,
         ),
-        # failure_recovery pool
+        # failure_recovery pool — Tier 2 pass + real recovery event pair
         _record(
             "fr-1",
             llm_claimed_success=True,
@@ -137,6 +186,7 @@ def _dataset() -> list[TrajectoryRecord]:
             tier2_pass=True,
             attempts=_recovery_attempts(),
             tokens=90,
+            tool_call_events=_recovery_events(),
         ),
         _record(
             "fr-2",
@@ -146,8 +196,10 @@ def _dataset() -> list[TrajectoryRecord]:
             tier2_pass=True,
             attempts=_recovery_attempts(),
             tokens=110,
+            tool_call_events=_recovery_events(),
         ),
         # weakly_verified + failed for unfiltered
+        #   wv-1: Tier 2 not configured → WEAKLY_VERIFIED branch
         _record(
             "wv-1",
             llm_claimed_success=True,
@@ -156,6 +208,7 @@ def _dataset() -> list[TrajectoryRecord]:
             tier2_pass=False,
             attempts=_one_shot_attempt(),
             tokens=70,
+            tier2_command="",
         ),
         _record(
             "fd-1",
@@ -248,6 +301,7 @@ class TestTokenBudgetSampler:
                 tier2_pass=True,
                 attempts=_recovery_attempts(),
                 tokens=100,
+                tool_call_events=_recovery_events(),
             )
         ]
         with pytest.raises(TokenBudgetSamplingError, match="clean_only"):

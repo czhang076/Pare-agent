@@ -76,6 +76,11 @@ class FileEditTool(Tool):
         if forbidden:
             return ToolResult(success=False, output="", error=forbidden)
 
+        if context.exec_target == "container":
+            return await self._execute_in_container(
+                file_path_str, old_str, new_str, context
+            )
+
         file_path = (context.cwd / file_path_str).resolve()
 
         # Security check
@@ -239,6 +244,102 @@ class FileEditTool(Tool):
             return "\n".join(f"  {m}" for m in matches)
         return ""
 
+    async def _execute_in_container(
+        self,
+        file_path_str: str,
+        old_str: str,
+        new_str: str,
+        context: ToolContext,
+    ) -> ToolResult:
+        """Container-mode edit — read via container, match + replace, write back.
+
+        Mirrors the host branch's single-match / whitespace-fallback logic
+        but sources content from :meth:`InstanceContainer.read_file` and
+        writes via :meth:`write_file`. The diff returned in ``output``
+        matches the host shape so downstream ToolCallEvent consumers see
+        uniform structure.
+        """
+        if context.container is None:
+            return ToolResult(
+                success=False,
+                output="",
+                error="file_edit container mode requires ToolContext.container",
+            )
+
+        abs_path = _abs_container_path(file_path_str, context.cwd)
+        if abs_path is None:
+            return ToolResult(
+                success=False,
+                output="",
+                error=f"Access denied: {file_path_str} is outside the project directory.",
+            )
+
+        try:
+            content = await context.container.read_file(abs_path, max_bytes=10 * 1024 * 1024)
+        except Exception as e:
+            return ToolResult(
+                success=False,
+                output="",
+                error=f"File not found: {file_path_str}. Use file_create for new files. ({e})",
+            )
+
+        count = content.count(old_str)
+        if count == 0:
+            match_result = self._whitespace_fallback(content, old_str)
+            if match_result is not None:
+                matched_str, ws_count = match_result
+                if ws_count == 1:
+                    logger.warning(
+                        "Exact match failed but whitespace-normalized match found in %s. "
+                        "Applying edit with warning.",
+                        file_path_str,
+                    )
+                    old_str = matched_str
+                    count = 1
+                else:
+                    return ToolResult(
+                        success=False,
+                        output="",
+                        error=(
+                            f"old_str not found exactly, but whitespace-normalized match "
+                            f"hits {ws_count} times in {file_path_str}. "
+                            "Include more context to make it unique."
+                        ),
+                    )
+            else:
+                hint = self._find_similar(content, old_str)
+                error = f"old_str not found in {file_path_str}."
+                if hint:
+                    error += f" Did you mean:\n{hint}"
+                return ToolResult(success=False, output="", error=error)
+
+        if count > 1:
+            return ToolResult(
+                success=False,
+                output="",
+                error=(
+                    f"old_str matches {count} times in {file_path_str}. "
+                    "It must match exactly once. Include more surrounding "
+                    "context to make the match unique."
+                ),
+            )
+
+        new_content = content.replace(old_str, new_str, 1)
+        diff = self._generate_diff(content, new_content, file_path_str)
+        try:
+            await context.container.write_file(abs_path, new_content)
+        except Exception as e:
+            return ToolResult(
+                success=False,
+                output="",
+                error=f"Failed to write {file_path_str}: {e}",
+            )
+        return ToolResult(
+            success=True,
+            output=diff,
+            metadata={"file_path": file_path_str},
+        )
+
 
 class FileCreateTool(Tool):
     name = "file_create"
@@ -275,6 +376,9 @@ class FileCreateTool(Tool):
         if forbidden:
             return ToolResult(success=False, output="", error=forbidden)
 
+        if context.exec_target == "container":
+            return await self._execute_in_container(file_path_str, content, context)
+
         file_path = (context.cwd / file_path_str).resolve()
 
         # Security check
@@ -306,3 +410,90 @@ class FileCreateTool(Tool):
             output=f"Created {file_path_str} ({line_count} lines)",
             metadata={"file_path": file_path_str, "lines": line_count},
         )
+
+    async def _execute_in_container(
+        self, file_path_str: str, content: str, context: ToolContext
+    ) -> ToolResult:
+        """Container-mode create — refuses overwrite, writes via put_archive."""
+        if context.container is None:
+            return ToolResult(
+                success=False,
+                output="",
+                error="file_create container mode requires ToolContext.container",
+            )
+
+        abs_path = _abs_container_path(file_path_str, context.cwd)
+        if abs_path is None:
+            return ToolResult(
+                success=False,
+                output="",
+                error=f"Access denied: {file_path_str} is outside the project directory.",
+            )
+
+        # Refuse overwrite via an explicit `test -e`; cheaper than a full read.
+        check = await context.container.exec(
+            f"test -e {_q(abs_path)}", timeout=10.0
+        )
+        if check.exit_code == 0:
+            return ToolResult(
+                success=False,
+                output="",
+                error=f"File already exists: {file_path_str}. Use file_edit to modify it.",
+            )
+
+        try:
+            await context.container.write_file(abs_path, content)
+        except Exception as e:
+            return ToolResult(
+                success=False,
+                output="",
+                error=f"Failed to write {file_path_str}: {e}",
+            )
+
+        line_count = len(content.splitlines())
+        return ToolResult(
+            success=True,
+            output=f"Created {file_path_str} ({line_count} lines)",
+            metadata={"file_path": file_path_str, "lines": line_count},
+        )
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _abs_container_path(file_path_str: str, cwd: Path) -> str | None:
+    """Resolve ``file_path_str`` against container cwd; reject escapes.
+
+    Returns absolute posix path inside ``cwd`` or ``None`` if the computed
+    path would sit outside ``cwd`` (mirrors the host path's relative_to()
+    escape check).
+    """
+    cwd_str = str(cwd).replace("\\", "/").rstrip("/")
+    if file_path_str.startswith("/"):
+        abs_path = file_path_str
+    else:
+        abs_path = f"{cwd_str}/{file_path_str}"
+    # Collapse ``..`` lexically — we do not call realpath to avoid a second
+    # container roundtrip; lexical check is enough to deny escapes.
+    parts: list[str] = []
+    for seg in abs_path.split("/"):
+        if seg in ("", "."):
+            continue
+        if seg == "..":
+            if not parts:
+                return None
+            parts.pop()
+            continue
+        parts.append(seg)
+    normalised = "/" + "/".join(parts)
+    if normalised != cwd_str and not normalised.startswith(cwd_str + "/"):
+        return None
+    return normalised
+
+
+def _q(path: str) -> str:
+    """Shell-quote a posix path for use inside ``bash -lc`` commands."""
+    import shlex
+    return shlex.quote(path)

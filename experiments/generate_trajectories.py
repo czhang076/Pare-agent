@@ -2,6 +2,13 @@
 
 Reads task definitions from JSONL and executes headless agent runs for each
 task and seed, appending one trajectory record per run.
+
+R5 state: every run goes through the flat ReAct loop inside a per-instance
+``InstanceContainer``. The legacy 3-layer orchestrator path and its
+host-mode / tier2-docker wiring have been deleted; ``--tier2-mode``,
+``--test-command``, ``--tier2-python`` are gone. Tier 2 is now an opt-in
+``--verify`` flag that runs SWE-bench's eval script inside the same
+container the agent just used.
 """
 
 from __future__ import annotations
@@ -11,26 +18,12 @@ import asyncio
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
-import shlex
 import sys
 
 if __package__ in (None, ""):
     sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from pare.cli.headless import run_headless
-
-
-def _resolve_tier2_command(template: str | None, python_bin: str) -> str | None:
-    """Substitute the `{python}` placeholder in a tier2 command template.
-
-    Returns None when template is None or empty. The python binary is
-    shlex-quoted so venv paths with whitespace survive `shell=True`.
-    """
-    if not template:
-        return None
-    if "{python}" not in template:
-        return template
-    return template.replace("{python}", shlex.quote(python_bin))
+from pare.cli.headless import run_headless_flat_react
 
 
 class GenerationError(ValueError):
@@ -77,40 +70,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default=None)
     parser.add_argument("--api-key", default=None)
     parser.add_argument("--base-url", default=None)
-    parser.add_argument("--cwd", default=None, help="Default working directory for tasks.")
     parser.add_argument("--seeds", default="0", help="Comma-separated seed list, e.g. 0,1,2")
     parser.add_argument("--max-instances", type=int, default=None)
-    parser.add_argument("--test-command", default=None)
-    parser.add_argument("--test-timeout", type=int, default=300)
-    parser.add_argument(
-        "--tier2-python",
-        default=None,
-        help=(
-            "Python interpreter substituted for the `{python}` placeholder "
-            "in tier2_command. Defaults to sys.executable. Override this "
-            "when the calling shell's `python` is not the venv, so tier2 "
-            "does not silently fall back to a global interpreter without "
-            "the repo's dependencies."
-        ),
-    )
-    parser.add_argument(
-        "--use-planning",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Use Orient -> Plan -> Execute mode (default: true).",
-    )
-    parser.add_argument(
-        "--max-tool-calls",
-        type=int,
-        default=40,
-        help="Total tool-call budget per task (default: 40).",
-    )
-    parser.add_argument(
-        "--max-tool-calls-per-step",
-        type=int,
-        default=12,
-        help="Per-step tool-call budget (default: 12).",
-    )
     parser.add_argument("--report-json", default=None, help="Optional report JSON output path.")
     parser.add_argument(
         "--stop-on-setup-error",
@@ -118,31 +79,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Stop batch run when a setup/runtime infra error happens (exit code != 0/1).",
     )
     parser.add_argument(
-        "--tier2-mode",
-        choices=["host", "docker", "off"],
-        default="host",
-        help=(
-            "Where tier2 pytest runs. 'host' (default) runs test_command inline; "
-            "'docker' delegates to SWE-bench harness per instance (requires "
-            "pare[docker-eval]); 'off' skips tier2. In docker/off mode, "
-            "--test-command and --tier2-python are ignored."
-        ),
+        "--dataset",
+        default="princeton-nlp/SWE-bench_Verified",
+        help="Dataset name (default: SWE-bench_Verified).",
     )
     parser.add_argument(
-        "--tier2-docker-run-id",
-        default=None,
-        help="SWE-bench run_id for docker tier2 (default: 'pare-<model>-<timestamp>').",
+        "--split",
+        default="test",
+        help="Dataset split (default: test).",
     )
     parser.add_argument(
-        "--tier2-docker-timeout",
+        "--max-steps",
         type=int,
-        default=1800,
-        help="Per-instance harness timeout in seconds (default: 1800).",
+        default=50,
+        help="Max LLM turns per instance (default: 50).",
     )
     parser.add_argument(
-        "--tier2-docker-model-name",
-        default="pare_v6",
-        help="model_name_or_path recorded in harness predictions (default: pare_v6).",
+        "--verify",
+        action="store_true",
+        help="Run Tier-2 verification inside the same container after the loop.",
     )
     return parser
 
@@ -224,27 +179,19 @@ async def generate_trajectories(
     model: str | None = None,
     api_key: str | None = None,
     base_url: str | None = None,
-    default_cwd: Path | None = None,
     seeds: list[int] | None = None,
     max_instances: int | None = None,
-    test_command: str | None = None,
-    test_timeout: int = 300,
-    tier2_python: str | None = None,
-    use_planning: bool = True,
-    max_tool_calls: int = 40,
-    max_tool_calls_per_step: int = 12,
     stop_on_setup_error: bool = False,
-    tier2_mode: str = "host",
-    tier2_docker_run_id: str | None = None,
-    tier2_docker_timeout: int = 1800,
-    tier2_docker_model_name: str = "pare_v6",
+    dataset_name: str = "princeton-nlp/SWE-bench_Verified",
+    split: str = "test",
+    max_steps: int = 50,
+    verify: bool = False,
 ) -> GenerationReport:
     if not tasks:
         raise GenerationError("tasks list is empty")
 
     run_seeds = seeds or [0]
     selected_tasks = tasks[:max_instances] if max_instances is not None else list(tasks)
-    python_bin = tier2_python or sys.executable
 
     runs_requested = len(selected_tasks) * len(run_seeds)
     runs_completed = 0
@@ -252,87 +199,45 @@ async def generate_trajectories(
     runs_agent_failed = 0
     runs_setup_failed = 0
 
-    # Build one DockerEvalSession for the whole batch — dataset load (~5s)
-    # and docker handshake happen exactly once. Import lazily so default
-    # (host mode) runs don't pay the swebench / datasets import cost.
-    docker_session = None
-    if tier2_mode == "docker":
-        from pare.sandbox.docker_eval import DockerEvalConfig, build_session
-
-        import time as _time
-        resolved_run_id = tier2_docker_run_id or (
-            f"pare-{tier2_docker_model_name}-{int(_time.time())}"
-        )
-        docker_session = build_session(
-            DockerEvalConfig(
-                model_name=tier2_docker_model_name,
-                run_id=resolved_run_id,
-                timeout=tier2_docker_timeout,
-            )
-        )
-        if test_command or tier2_python:
-            print(
-                "[warn] --test-command / --tier2-python ignored under "
-                "--tier2-mode=docker (tier2 runs inside SWE-bench image)",
-                file=sys.stderr,
+    for task in selected_tasks:
+        for seed in run_seeds:
+            exit_code = await run_headless_flat_react(
+                task=task.task,
+                provider=provider,
+                model=model,
+                api_key=api_key,
+                base_url=base_url,
+                output_path=None,
+                trajectory_path=trajectory_jsonl,
+                instance_id=task.instance_id,
+                dataset_name=dataset_name,
+                split=split,
+                seed=seed,
+                max_steps=max_steps,
+                verify=verify,
+                verbose=False,
             )
 
-    tier2_verifier = docker_session.verify_diff if docker_session is not None else None
-
-    try:
-        for task in selected_tasks:
-            run_cwd = Path(task.cwd).resolve() if task.cwd else default_cwd
-            if tier2_mode == "host":
-                raw_test_command = task.tier2_command or test_command
-                run_test_command = _resolve_tier2_command(raw_test_command, python_bin)
+            if exit_code == 0:
+                runs_completed += 1
+                runs_succeeded += 1
+            elif exit_code == 1:
+                runs_completed += 1
+                runs_agent_failed += 1
             else:
-                run_test_command = None
-
-            for seed in run_seeds:
-                exit_code = await run_headless(
-                    task=task.task,
-                    provider=provider,
-                    model=model,
-                    api_key=api_key,
-                    base_url=base_url,
-                    cwd=run_cwd,
-                    output_path=None,
-                    trajectory_path=trajectory_jsonl,
-                    instance_id=task.instance_id,
-                    seed=seed,
-                    test_command=run_test_command,
-                    test_timeout=test_timeout,
-                    use_planning=use_planning,
-                    max_tool_calls=max_tool_calls,
-                    max_tool_calls_per_step=max_tool_calls_per_step,
-                    tier2_mode=tier2_mode,
-                    tier2_verifier=tier2_verifier,
-                    verbose=False,
-                )
-
-                if exit_code == 0:
-                    runs_completed += 1
-                    runs_succeeded += 1
-                elif exit_code == 1:
-                    runs_completed += 1
-                    runs_agent_failed += 1
-                else:
-                    runs_setup_failed += 1
-                    if stop_on_setup_error:
-                        return GenerationReport(
-                            tasks_loaded=len(tasks),
-                            tasks_run=len(selected_tasks),
-                            runs_requested=runs_requested,
-                            runs_completed=runs_completed,
-                            runs_succeeded=runs_succeeded,
-                            runs_agent_failed=runs_agent_failed,
-                            runs_setup_failed=runs_setup_failed,
-                            seeds=list(run_seeds),
-                            trajectory_jsonl=trajectory_jsonl,
-                        )
-    finally:
-        if docker_session is not None:
-            docker_session.close()
+                runs_setup_failed += 1
+                if stop_on_setup_error:
+                    return GenerationReport(
+                        tasks_loaded=len(tasks),
+                        tasks_run=len(selected_tasks),
+                        runs_requested=runs_requested,
+                        runs_completed=runs_completed,
+                        runs_succeeded=runs_succeeded,
+                        runs_agent_failed=runs_agent_failed,
+                        runs_setup_failed=runs_setup_failed,
+                        seeds=list(run_seeds),
+                        trajectory_jsonl=trajectory_jsonl,
+                    )
 
     return GenerationReport(
         tasks_loaded=len(tasks),
@@ -355,23 +260,6 @@ def main(argv: list[str] | None = None) -> int:
         tasks = load_tasks_jsonl(Path(args.tasks_jsonl))
         seeds = parse_seed_list(args.seeds)
 
-        # Resolve --tier2-python to an absolute path if given. tier2 runs
-        # with cwd=workdir (e.g. data/swebench_workdirs/<instance>), so a
-        # relative path like `.venv-sympy/Scripts/python.exe` — which
-        # resolves against the CLI invocation directory — breaks the moment
-        # we hand it to a subprocess with a different cwd.
-        #
-        # Use absolute() not resolve(): resolve() follows symlinks, and a
-        # venv's bin/python IS a symlink (→ /usr/bin/python3.12 on Linux).
-        # Resolving it defeats the whole venv mechanism — sys.prefix logic
-        # keys on sys.argv[0] being inside the venv dir, so the subprocess
-        # silently runs the *system* interpreter without the venv's packages
-        # (pytest, mpmath). Tier2 then fails with ModuleNotFoundError.
-        tier2_python = (
-            str(Path(args.tier2_python).absolute())
-            if args.tier2_python else None
-        )
-
         report = asyncio.run(
             generate_trajectories(
                 tasks,
@@ -380,20 +268,13 @@ def main(argv: list[str] | None = None) -> int:
                 model=args.model,
                 api_key=args.api_key,
                 base_url=args.base_url,
-                default_cwd=Path(args.cwd).resolve() if args.cwd else None,
                 seeds=seeds,
                 max_instances=args.max_instances,
-                test_command=args.test_command,
-                test_timeout=args.test_timeout,
-                tier2_python=tier2_python,
-                use_planning=args.use_planning,
-                max_tool_calls=args.max_tool_calls,
-                max_tool_calls_per_step=args.max_tool_calls_per_step,
                 stop_on_setup_error=args.stop_on_setup_error,
-                tier2_mode=args.tier2_mode,
-                tier2_docker_run_id=args.tier2_docker_run_id,
-                tier2_docker_timeout=args.tier2_docker_timeout,
-                tier2_docker_model_name=args.tier2_docker_model_name,
+                dataset_name=args.dataset,
+                split=args.split,
+                max_steps=args.max_steps,
+                verify=args.verify,
             )
         )
     except Exception as e:
