@@ -24,7 +24,14 @@ from typing import Iterable
 
 import pytest
 
-from pare.agent.loop import LoopConfig, LoopResult, run_agent
+from pare.agent.loop import (
+    LoopConfig,
+    LoopResult,
+    _NO_TEST_NUDGE,
+    _maybe_test_nudge,
+    run_agent,
+)
+from pare.trajectory.schema_v2 import ErrorSignal, ToolCallEvent
 from pare.llm.base import (
     LLMAdapter,
     LLMResponse,
@@ -392,3 +399,157 @@ async def test_llm_exception_yields_error_exit() -> None:
     # tier2 must be skipped on error exits (plan §R3 Risks)
     assert result.tier2_enabled is False
     assert result.success is False
+
+
+# ---------------------------------------------------------------------------
+# test_nudge ablation (Step 1 of the 100-trajectory roadmap)
+# ---------------------------------------------------------------------------
+
+
+def _event(tool_name: str, idx: int = 0) -> ToolCallEvent:
+    """Minimal ToolCallEvent fixture for _maybe_test_nudge unit tests."""
+    return ToolCallEvent.create(
+        turn_id=idx,
+        call_index_in_turn=0,
+        global_index=idx,
+        tool_name=tool_name,
+        params={},
+        result_success=True,
+        result_content="",
+        timestamp=0.0,
+        error_signal=ErrorSignal.NONE,
+    )
+
+
+class TestMaybeTestNudge:
+    def test_below_threshold_returns_none(self):
+        events = [_event("file_edit", i) for i in range(3)]
+        assert _maybe_test_nudge(events, threshold=5) is None
+
+    def test_threshold_zero_returns_none(self):
+        """threshold <= 0 must never fire, even with 100 edits."""
+        events = [_event("file_edit", i) for i in range(10)]
+        assert _maybe_test_nudge(events, threshold=0) is None
+
+    def test_edits_without_bash_fires(self):
+        """The exact B2.1 Wrong-Fix signature: edits, no bash."""
+        events = [_event("file_edit", i) for i in range(5)]
+        assert _maybe_test_nudge(events, threshold=5) == _NO_TEST_NUDGE
+
+    def test_file_create_counts_as_edit(self):
+        """file_create is semantically an edit for this check."""
+        events = [_event("file_create", i) for i in range(5)]
+        assert _maybe_test_nudge(events, threshold=5) == _NO_TEST_NUDGE
+
+    def test_edits_with_bash_does_not_fire(self):
+        """Agent ran a test → nudge is unnecessary."""
+        events = [
+            _event("file_edit", 0),
+            _event("file_edit", 1),
+            _event("bash", 2),
+            _event("file_edit", 3),
+            _event("file_edit", 4),
+        ]
+        assert _maybe_test_nudge(events, threshold=5) is None
+
+    def test_only_reads_does_not_fire(self):
+        """No edits in the window → this isn't the wrong-fix shape."""
+        events = [_event("file_read", i) for i in range(5)]
+        assert _maybe_test_nudge(events, threshold=5) is None
+
+    def test_only_looks_at_recent_window(self):
+        """An ancient bash call must not suppress a present wrong-fix streak."""
+        events = [
+            _event("bash", 0),
+            _event("file_edit", 1),
+            _event("file_edit", 2),
+            _event("file_edit", 3),
+            _event("file_edit", 4),
+            _event("file_edit", 5),
+        ]
+        # threshold=5 → recent window is events[1:6], no bash → nudge fires.
+        assert _maybe_test_nudge(events, threshold=5) == _NO_TEST_NUDGE
+
+
+@pytest.mark.asyncio
+async def test_use_test_nudge_switch_off_does_not_inject() -> None:
+    """With ablation switch off, no _NO_TEST_NUDGE text reaches messages.
+
+    This is the invariant that preserves v7/v8 baseline byte-identity —
+    ``use_test_nudge=False`` must produce the exact same message stream
+    as before the ablation was added.
+    """
+    edit_resp = _resp(
+        content="editing again",
+        tool_calls=[_tc("c1", "file_edit", {
+            "file_path": "/testbed/a.py",
+            "old_str": "x",
+            "new_str": "y",
+        })],
+    )
+    llm = FakeLLM([edit_resp] * 10)
+    container = FakeContainer(files={"/testbed/a.py": "x\n"})
+    registry = create_default_registry()
+
+    result = await run_agent(
+        llm=llm,
+        task="edit forever",
+        container=container,
+        registry=registry,
+        config=LoopConfig(
+            max_steps=6,
+            use_test_nudge=False,
+            no_test_nudge_after=3,
+            # Turn off the edit-nudge so its text can't fool the assertion.
+            no_edit_nudge_after=0,
+        ),
+    )
+
+    assert result.stop_reason == "budget_exhausted"
+    joined = "\n".join(
+        m.content if isinstance(m.content, str) else ""
+        for m in result.messages
+    )
+    assert _NO_TEST_NUDGE not in joined
+
+
+@pytest.mark.asyncio
+async def test_use_test_nudge_switch_on_injects_after_threshold() -> None:
+    """With switch on and file_edit-only streak ≥ threshold, nudge injected.
+
+    Asserts the exact B2.1 Wrong-Fix nudge copy reaches the user-role
+    message stream, which is what a downstream SFT exporter would see.
+    """
+    edit_resp = _resp(
+        content="editing again",
+        tool_calls=[_tc("c1", "file_edit", {
+            "file_path": "/testbed/a.py",
+            "old_str": "x",
+            "new_str": "y",
+        })],
+    )
+    llm = FakeLLM([edit_resp] * 10)
+    container = FakeContainer(files={"/testbed/a.py": "x\n"})
+    registry = create_default_registry()
+
+    result = await run_agent(
+        llm=llm,
+        task="edit forever",
+        container=container,
+        registry=registry,
+        config=LoopConfig(
+            max_steps=6,
+            use_test_nudge=True,
+            no_test_nudge_after=3,
+            no_edit_nudge_after=0,
+        ),
+    )
+
+    user_nudges = [
+        m for m in result.messages
+        if m.role == "user" and isinstance(m.content, str)
+        and m.content == _NO_TEST_NUDGE
+    ]
+    assert len(user_nudges) >= 1, (
+        "expected at least one _NO_TEST_NUDGE message after 3 edits with no bash"
+    )

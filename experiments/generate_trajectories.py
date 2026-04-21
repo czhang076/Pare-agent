@@ -115,6 +115,15 @@ def build_parser() -> argparse.ArgumentParser:
             "injected into the system prompt before the main ReAct loop."
         ),
     )
+    parser.add_argument(
+        "--use-test-nudge",
+        action="store_true",
+        help=(
+            "Enable the 'edit without testing' advisory nudge: after N "
+            "file_edits with zero bash, push the agent to run a test. "
+            "Ablation variable targeting the B2.1 Wrong-Fix pattern."
+        ),
+    )
     return parser
 
 
@@ -204,6 +213,7 @@ async def generate_trajectories(
     verify: bool = False,
     use_orient: bool = False,
     use_planner: bool = False,
+    use_test_nudge: bool = False,
 ) -> GenerationReport:
     if not tasks:
         raise GenerationError("tasks list is empty")
@@ -235,6 +245,7 @@ async def generate_trajectories(
                 verify=verify,
                 use_orient=use_orient,
                 use_planner=use_planner,
+                use_test_nudge=use_test_nudge,
                 verbose=False,
             )
 
@@ -297,6 +308,7 @@ def main(argv: list[str] | None = None) -> int:
                 verify=args.verify,
                 use_orient=args.use_orient,
                 use_planner=args.use_planner,
+                use_test_nudge=args.use_test_nudge,
             )
         )
     except Exception as e:

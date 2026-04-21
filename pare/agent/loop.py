@@ -81,12 +81,19 @@ class LoopConfig:
     max_tool_result_lines: int = 200
     # Advisory nudge when the last N steps contain no file_edit/file_create.
     no_edit_nudge_after: int = 6
+    # Advisory nudge when the last N steps contain file_edit(s) but zero
+    # bash — i.e. the "edit blindly without testing" B2.1 Wrong-Fix signature
+    # observed on sympy__sympy-12489 (50 steps, 15 edits, 0 bash, tier2=False).
+    # Gated on ``use_test_nudge`` so v7/v8 baselines remain byte-identical
+    # when the switch is off.
+    no_test_nudge_after: int = 5
     # --- tier2 finalize hook ------------------------------------------------
     verify_instance_id: Optional[str] = None  # set → tier2 runs after loop
     checkpoint_enabled: bool = True
     # --- ablation switches (plan.md §5.4.3) ---------------------------------
     use_orient: bool = False
     use_planner: bool = False
+    use_test_nudge: bool = False
 
 
 @dataclass(slots=True)
@@ -170,6 +177,42 @@ def _maybe_nudge(events: list[ToolCallEvent], threshold: int) -> Optional[str]:
     return _NO_EDIT_NUDGE
 
 
+_NO_TEST_NUDGE = (
+    "[advisory] You have edited files recently but not run a test or script. "
+    "Before editing further, invoke bash to execute the failing test "
+    "(e.g. `python -m pytest <test_path> -x`) or a minimal reproducer, so "
+    "you can tell whether your edits actually work. Blind editing without "
+    "runtime feedback is the most common cause of wrong fixes."
+)
+
+
+def _maybe_test_nudge(
+    events: list[ToolCallEvent], threshold: int,
+) -> Optional[str]:
+    """Return advisory text when the agent edits without testing.
+
+    Fires when the last ``threshold`` events contain at least one
+    ``file_edit``/``file_create`` and zero ``bash``. This is the B2.1
+    "Wrong Fix" signature from sympy__sympy-12489 — the agent revises a
+    file repeatedly without ever running the test to check the revision.
+
+    Ablation-gated via ``LoopConfig.use_test_nudge`` so turning the switch
+    off reproduces the v7/v8 behaviour exactly; turning it on lets us
+    measure whether earlier test invocations shift trajectories off the
+    B2.1 label into verified_with_recovery.
+    """
+    if threshold <= 0 or len(events) < threshold:
+        return None
+    recent = events[-threshold:]
+    has_edit = any(
+        e.tool_name in ("file_edit", "file_create") for e in recent
+    )
+    has_bash = any(e.tool_name == "bash" for e in recent)
+    if has_edit and not has_bash:
+        return _NO_TEST_NUDGE
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -239,10 +282,21 @@ async def run_agent(
 
     # ---- main loop ---------------------------------------------------------
     for step in range(config.max_steps):
-        # 1. optional advisory nudge (inject as a user-role system-style hint)
+        # 1. optional advisory nudge (inject as a user-role system-style hint).
+        # The test-nudge is gated on the ablation switch; the edit-nudge
+        # fires unconditionally as it did before. Both route through the
+        # same user-role injection so the LLM sees a single advisory.
         nudge = _maybe_nudge(state.events, config.no_edit_nudge_after)
         if nudge is not None:
             state.messages.append(Message(role="user", content=nudge))
+        if config.use_test_nudge:
+            test_nudge = _maybe_test_nudge(
+                state.events, config.no_test_nudge_after,
+            )
+            if test_nudge is not None:
+                state.messages.append(
+                    Message(role="user", content=test_nudge),
+                )
 
         # 2. LLM call — any exception → unified error exit
         try:
