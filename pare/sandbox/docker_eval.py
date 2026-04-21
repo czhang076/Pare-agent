@@ -13,6 +13,7 @@ default Pare install without the docker-eval extra keeps working.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from functools import lru_cache
 import json
@@ -148,54 +149,94 @@ def _spec_for(
     return spec, image_tag
 
 
+# Process-wide cache of DockerEvalSession instances keyed by (dataset, split).
+# A single session carries the docker client handshake + HF dataset load, both
+# of which are expensive to repeat across a batch run. Pilots are sequential
+# (experiments/generate_trajectories.py iterates tasks serially), so a simple
+# dict cache without locking is sufficient; call ``_close_tier2_sessions()``
+# from test teardown if you need a clean slate.
+_TIER2_SESSIONS: dict[tuple[str, str], "DockerEvalSession"] = {}
+
+
+def _get_tier2_session(
+    *,
+    dataset_name: str,
+    split: str,
+) -> "DockerEvalSession":
+    """Return a cached DockerEvalSession for ``(dataset_name, split)``."""
+    key = (dataset_name, split)
+    session = _TIER2_SESSIONS.get(key)
+    if session is None:
+        session = build_session(DockerEvalConfig(
+            dataset_name=dataset_name,
+            split=split,
+        ))
+        _TIER2_SESSIONS[key] = session
+    return session
+
+
+def _close_tier2_sessions() -> None:
+    """Close all cached sessions — test-only helper."""
+    for session in _TIER2_SESSIONS.values():
+        session.close()
+    _TIER2_SESSIONS.clear()
+
+
 async def run_tier2_in_container(
     container: Any,  # InstanceContainer — avoid circular import
     final_diff: str,
     *,
     timeout: float = 1800.0,
 ) -> Tier2CheckResult:
-    """Run SWE-bench Tier-2 verification inside an already-running container.
+    """Run SWE-bench Tier-2 verification for the agent's final diff.
 
-    Unlike :meth:`DockerEvalSession.verify_diff`, this reuses the agent's
-    long-lived container instead of spinning a fresh one via
-    ``swebench.harness.run_evaluation.run_instance``. The caller keeps the
-    same environment the agent worked in, so the "tool error and test
-    failure come from identical envs" invariant holds.
+    Delegates to :meth:`DockerEvalSession.verify_diff`, which invokes the
+    official ``swebench.harness.run_evaluation.run_instance`` entry point.
+    That path spins up a **fresh** container for the grading run rather than
+    reusing the agent's long-lived ``container`` — we accept that trade-off
+    because the official harness is the authority for ``resolved``, so Pare's
+    numbers stay comparable to published leaderboards without us re-deriving
+    the grading logic.
 
-    R1 ships a stub that short-circuits on empty diff and otherwise records
-    ``error="run_tier2_in_container not implemented"``. Real implementation
-    lands when we port the ``eval_script`` / ``test_patch`` application
-    logic from ``swebench.harness.grading`` into an in-container pytest
-    invocation (planned alongside R3 smoke).
+    The ideal "reuse agent's container" path is a future upgrade: it would
+    port ``eval_script`` / ``test_patch`` application + FAIL_TO_PASS parsing
+    from ``swebench.harness.grading`` into an in-container pytest call. Not
+    worth the complexity until in-container vs fresh-container outcomes
+    actually diverge on real instances.
+
+    Arguments:
+        container: An :class:`InstanceContainer` with ``instance_id`` /
+            ``dataset_name`` / ``split`` attributes (used only to route to
+            the right TestSpec; the container itself is not touched).
+        final_diff: Raw agent diff (``.pare/`` hunks tolerated — they are
+            stripped inside :meth:`DockerEvalSession.verify_diff`).
+        timeout: Reserved for future in-container path; currently unused,
+            the shared session's ``config.timeout`` governs run_instance.
     """
     iid = getattr(container, "instance_id", "unknown")
-    if not final_diff or not final_diff.strip():
-        return Tier2CheckResult(
-            enabled=True,
-            command=f"swebench:{iid}",
-            passed=False,
-            return_code=None,
-            output="",
-            error="empty_diff_skipped_docker",
-        )
-    harness_diff = _strip_pare_internal_paths(final_diff)
-    if not harness_diff.strip():
-        return Tier2CheckResult(
-            enabled=True,
-            command=f"swebench:{iid}",
-            passed=False,
-            return_code=None,
-            output="",
-            error="empty_diff_after_pare_strip",
-        )
-    return Tier2CheckResult(
-        enabled=True,
-        command=f"swebench:{iid}",
-        passed=False,
-        return_code=None,
-        output="",
-        error="run_tier2_in_container not implemented (R3 smoke target)",
+    dataset_name = getattr(
+        container, "dataset_name", "princeton-nlp/SWE-bench_Verified",
     )
+    split = getattr(container, "split", "test")
+
+    try:
+        session = _get_tier2_session(
+            dataset_name=dataset_name, split=split,
+        )
+    except DockerEvalUnavailable as e:
+        return Tier2CheckResult(
+            enabled=True,
+            command=f"swebench:{iid}",
+            passed=False,
+            return_code=None,
+            output="",
+            error=str(e),
+        )
+
+    # verify_diff handles its own empty-diff / .pare-only-diff short-circuits
+    # and its own docker-level error mapping, so there is nothing to do here
+    # beyond running it off the event loop.
+    return await asyncio.to_thread(session.verify_diff, iid, final_diff)
 
 
 @dataclass(frozen=True, slots=True)

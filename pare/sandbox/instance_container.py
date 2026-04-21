@@ -95,11 +95,18 @@ class InstanceContainer:
         client: Any,  # docker.DockerClient
         workdir: str = "/testbed",
         name: Optional[str] = None,
+        dataset_name: str = "princeton-nlp/SWE-bench_Verified",
+        split: str = "test",
     ) -> None:
         self.instance_id = instance_id
         self.image_tag = image_tag
         self.workdir = workdir
         self.name = name or _safe_container_name(instance_id)
+        # Dataset coordinates travel with the container so Tier 2 callers
+        # (``pare.sandbox.docker_eval.run_tier2_in_container``) can resolve
+        # the right TestSpec without LoopConfig having to re-plumb them.
+        self.dataset_name = dataset_name
+        self.split = split
         self._client = client
         self._container: Any = None  # docker.models.containers.Container
 
@@ -146,7 +153,13 @@ class InstanceContainer:
                 f"docker daemon unreachable: {e}"
             ) from e
 
-        return cls(instance_id=instance_id, image_tag=image_tag, client=client)
+        return cls(
+            instance_id=instance_id,
+            image_tag=image_tag,
+            client=client,
+            dataset_name=dataset_name,
+            split=split,
+        )
 
     async def __aenter__(self) -> "InstanceContainer":
         await self._start()
