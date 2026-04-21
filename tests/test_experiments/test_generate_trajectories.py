@@ -42,6 +42,21 @@ class TestGenerateTrajectories:
         assert args.verify is False
         assert args.dataset == "princeton-nlp/SWE-bench_Verified"
         assert args.split == "test"
+        # Pre-passes must default off so existing pilot scripts keep
+        # their behaviour — opt-in is the contract callers rely on.
+        assert args.use_orient is False
+        assert args.use_planner is False
+
+    def test_parser_accepts_prepass_flags(self):
+        parser = build_parser()
+        args = parser.parse_args([
+            "--tasks-jsonl", "tasks.jsonl",
+            "--trajectory-jsonl", "traj.jsonl",
+            "--use-orient",
+            "--use-planner",
+        ])
+        assert args.use_orient is True
+        assert args.use_planner is True
 
     def test_parse_seed_list(self):
         assert parse_seed_list("0,1,2") == [0, 1, 2]
@@ -169,3 +184,32 @@ class TestGenerateTrajectories:
         kwargs = mock_run.await_args_list[0].kwargs
         assert kwargs["verify"] is True
         assert kwargs["max_steps"] == 7
+        # Default state: pre-passes off, so every prior pilot invocation
+        # remains byte-identical in behaviour.
+        assert kwargs["use_orient"] is False
+        assert kwargs["use_planner"] is False
+
+    def test_main_passes_prepass_flags_through_to_headless(self, tmp_path: Path):
+        """``--use-orient`` / ``--use-planner`` must reach the headless entry
+        point. Without this wire, Phase 3.13.2 (orient_v2 repo map) and
+        planner_v2 are unreachable from batch pilot runs — the feature exists
+        in ``LoopConfig`` but no CLI path turns it on."""
+        tasks_path = tmp_path / "tasks.jsonl"
+        _write_tasks(tasks_path, [{"instance_id": "swe-1", "task": "Task"}])
+
+        mock_run = AsyncMock(return_value=0)
+        with patch(
+            "experiments.generate_trajectories.run_headless_flat_react",
+            mock_run,
+        ):
+            code = main([
+                "--tasks-jsonl", str(tasks_path),
+                "--trajectory-jsonl", str(tmp_path / "traj.jsonl"),
+                "--use-orient",
+                "--use-planner",
+            ])
+
+        assert code == 0
+        kwargs = mock_run.await_args_list[0].kwargs
+        assert kwargs["use_orient"] is True
+        assert kwargs["use_planner"] is True

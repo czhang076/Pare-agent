@@ -99,6 +99,22 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run Tier-2 verification inside the same container after the loop.",
     )
+    parser.add_argument(
+        "--use-orient",
+        action="store_true",
+        help=(
+            "Enable the zero-LLM orient_v2 pre-pass (README + top-level listing "
+            "+ Aider-style repo map) before the main ReAct loop."
+        ),
+    )
+    parser.add_argument(
+        "--use-planner",
+        action="store_true",
+        help=(
+            "Enable the LLM planner_v2 pre-pass (one-shot plan generation) "
+            "injected into the system prompt before the main ReAct loop."
+        ),
+    )
     return parser
 
 
@@ -186,6 +202,8 @@ async def generate_trajectories(
     split: str = "test",
     max_steps: int = 50,
     verify: bool = False,
+    use_orient: bool = False,
+    use_planner: bool = False,
 ) -> GenerationReport:
     if not tasks:
         raise GenerationError("tasks list is empty")
@@ -215,6 +233,8 @@ async def generate_trajectories(
                 seed=seed,
                 max_steps=max_steps,
                 verify=verify,
+                use_orient=use_orient,
+                use_planner=use_planner,
                 verbose=False,
             )
 
@@ -275,6 +295,8 @@ def main(argv: list[str] | None = None) -> int:
                 split=args.split,
                 max_steps=args.max_steps,
                 verify=args.verify,
+                use_orient=args.use_orient,
+                use_planner=args.use_planner,
             )
         )
     except Exception as e:
