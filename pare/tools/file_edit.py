@@ -12,6 +12,7 @@ overwrites — if a file already exists, use FileEditTool.
 
 from __future__ import annotations
 
+import ast
 import difflib
 import logging
 import re
@@ -161,6 +162,34 @@ class FileEditTool(Tool):
 
         # Write
         file_path.write_text(new_content, encoding="utf-8")
+
+        # Phase 3.13.1 post-edit lint: surface syntax errors immediately.
+        # The file is NOT rolled back — the agent must issue a follow-up
+        # file_edit to fix its own mistake, and Liu B2.2 "Syntax Error
+        # After Edit" becomes observable via extract_error_signal. The
+        # lint skips when pre-edit content was already invalid Python —
+        # attributing broken-before-edit to the agent is wrong.
+        syntax_error = _lint_python_host(
+            file_path_str, pre_content=content, post_content=new_content
+        )
+        if syntax_error is not None:
+            return ToolResult(
+                success=False,
+                output=diff,
+                # Literal marker ``⚠ SYNTAX ERROR:`` is required by
+                # ``extract_error_signal`` to classify this event as
+                # Liu B2.2. Keep the colon right after "ERROR" or the
+                # regex misses it and it falls to OTHER.
+                error=(
+                    f"⚠ SYNTAX ERROR: {syntax_error} "
+                    "(edit was applied; you must issue a follow-up "
+                    "file_edit to fix it)"
+                ),
+                metadata={
+                    "file_path": file_path_str,
+                    "syntax_error": syntax_error,
+                },
+            )
 
         return ToolResult(
             success=True,
@@ -334,6 +363,36 @@ class FileEditTool(Tool):
                 output="",
                 error=f"Failed to write {file_path_str}: {e}",
             )
+
+        # Phase 3.13.1 post-edit lint inside the container. We call the
+        # container's own python (via ``py_compile``) rather than
+        # re-parsing on the host so the version that will run the tests
+        # is the one that validates the syntax — catches f-string /
+        # match-statement / walrus deltas across Python versions. The
+        # host-side pre-check short-circuits the subprocess when the
+        # pre-edit file was already broken.
+        syntax_error = await _lint_python_container(
+            file_path_str, abs_path, context, pre_content=content
+        )
+        if syntax_error is not None:
+            return ToolResult(
+                success=False,
+                output=diff,
+                # Literal marker ``⚠ SYNTAX ERROR:`` is required by
+                # ``extract_error_signal`` to classify this event as
+                # Liu B2.2. Keep the colon right after "ERROR" or the
+                # regex misses it and it falls to OTHER.
+                error=(
+                    f"⚠ SYNTAX ERROR: {syntax_error} "
+                    "(edit was applied; you must issue a follow-up "
+                    "file_edit to fix it)"
+                ),
+                metadata={
+                    "file_path": file_path_str,
+                    "syntax_error": syntax_error,
+                },
+            )
+
         return ToolResult(
             success=True,
             output=diff,
@@ -497,3 +556,130 @@ def _q(path: str) -> str:
     """Shell-quote a posix path for use inside ``bash -lc`` commands."""
     import shlex
     return shlex.quote(path)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.13.1: post-edit syntax lint
+# ---------------------------------------------------------------------------
+#
+# SWE-agent's ACI surfaces compile errors immediately after every edit so
+# the model can self-correct in the same turn. Pare used to lack this
+# feedback loop, which meant Liu B2.2 "Syntax Error After Edit" signals
+# only showed up indirectly (pytest collection errors, ImportError when
+# another tool imported the broken module, etc.) — by the time they
+# reached ``extract_error_signal`` the causal link to the edit was lost.
+#
+# Design choices:
+# - Host mode uses ``ast.parse(new_content)``: zero subprocess, fast,
+#   deterministic, no dependency on any particular host Python version
+#   matching the target — we only need to know "is this file syntactically
+#   valid Python in the ast of whichever runtime we're using".
+# - Container mode uses ``python -m py_compile <path>`` inside the
+#   container: the runtime that will execute the tests is the one that
+#   validates the syntax. This matters for version-dependent features
+#   (match statements, walrus operator, new-style f-strings).
+# - Both return ``None`` on success and a short error string on failure.
+#   Non-Python files (by extension) skip the check — the lint is a
+#   guardrail for code edits, not a format policy.
+# - On lint failure, ``FileEditTool`` returns ``success=False`` but the
+#   file stays written. The agent sees the diff it produced + the
+#   syntax error and must issue a follow-up edit. ``success=False``
+#   routes through ``extract_error_signal`` → ``SYNTAX_ERROR`` (pattern
+#   ``⚠ SYNTAX ERROR:``), which is exactly the Liu B2.2 signal we want.
+
+
+_LINTABLE_SUFFIXES: tuple[str, ...] = (".py",)
+
+
+def _pre_content_was_valid_python(content: str) -> bool:
+    """True iff ``content`` already parses as Python before the edit.
+
+    The lint only measures "edit introduced a syntax error" (Liu B2.2);
+    if the pre-edit file was already broken — a stub, a template, a
+    test fixture that put plain text in a ``.py`` file — attributing
+    the breakage to the agent's edit is wrong, so we skip the lint
+    entirely. Uses the host Python's ast which may not catch every
+    container-Python-specific syntax, but that's fine: we're not
+    asserting the pre-file was valid everywhere, just "valid enough
+    that measuring delta is meaningful".
+    """
+    try:
+        ast.parse(content)
+    except (SyntaxError, ValueError):
+        return False
+    return True
+
+
+def _lint_python_host(
+    file_path_str: str, *, pre_content: str, post_content: str
+) -> str | None:
+    """Host-mode syntax check. Returns error string or ``None``.
+
+    Skips when the file extension isn't Python OR the pre-edit content
+    was itself not valid Python (see :func:`_pre_content_was_valid_python`).
+    """
+    if not _should_lint(file_path_str):
+        return None
+    if not _pre_content_was_valid_python(pre_content):
+        return None
+    try:
+        ast.parse(post_content)
+    except SyntaxError as e:
+        location = (
+            f" at line {e.lineno}" if e.lineno else ""
+        )
+        return f"{e.__class__.__name__}: {e.msg}{location}"
+    except ValueError as e:
+        # Embedded NUL bytes — still worth surfacing.
+        return f"ValueError: {e}"
+    return None
+
+
+async def _lint_python_container(
+    file_path_str: str,
+    abs_path: str,
+    context: "ToolContext",
+    *,
+    pre_content: str,
+) -> str | None:
+    """Container-mode syntax check via ``python -m py_compile``.
+
+    The check is bounded to 15 s — a clean py_compile on any sane source
+    file finishes in well under a second, so timeout here is a symptom
+    of container trouble, not a syntax issue. We treat a timeout as
+    "don't block the edit" rather than "syntax error" to avoid false
+    positives poisoning the error_signal histogram.
+    """
+    if not _should_lint(file_path_str):
+        return None
+    if not _pre_content_was_valid_python(pre_content):
+        return None
+    if context.container is None:
+        return None
+    try:
+        r = await context.container.exec(
+            f"python -m py_compile {_q(abs_path)}",
+            timeout=15.0,
+        )
+    except Exception as e:
+        logger.warning("post-edit lint container exec failed: %s", e)
+        return None
+    if r.exit_code == 0:
+        return None
+    if r.timed_out:
+        logger.warning("post-edit lint timed out for %s", file_path_str)
+        return None
+    err_text = (r.stderr or r.stdout or "").strip()
+    if not err_text:
+        return f"py_compile exit={r.exit_code}"
+    # py_compile prints the full traceback; keep the last two non-empty
+    # lines, which carry the file:line + message.
+    lines = [ln for ln in err_text.splitlines() if ln.strip()]
+    snippet = "\n".join(lines[-2:]) if len(lines) >= 2 else err_text
+    return snippet[:500]
+
+
+def _should_lint(file_path_str: str) -> bool:
+    """Return True iff ``file_path_str`` is a Python source file we
+    should lint after editing."""
+    return file_path_str.endswith(_LINTABLE_SUFFIXES)

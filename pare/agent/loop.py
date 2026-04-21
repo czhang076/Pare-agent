@@ -220,9 +220,18 @@ async def run_agent(
         exec_target="container",
     )
 
+    # Optional pre-passes (orient + planner). They run before the main
+    # loop and only mutate the system prompt — never the control flow.
+    # Both fail open: if they raise or return empty, we fall through to
+    # the unaugmented baseline. `use_orient` runs first so its blob can
+    # feed into the planner's user message as repo_context.
+    effective_system_prompt = await _run_prepasses(
+        llm=llm, task=task, container=container, config=config,
+    )
+
     state = _LoopState(
         base_commit=base_commit,
-        messages=_build_initial_messages(config.system_prompt, task),
+        messages=_build_initial_messages(effective_system_prompt, task),
         events=[],
         global_index=0,
         total_usage=TokenUsage(input_tokens=0, output_tokens=0),
@@ -358,6 +367,61 @@ async def run_agent(
 # ---------------------------------------------------------------------------
 # Helpers (loop body only sets state; _finalize builds LoopResult)
 # ---------------------------------------------------------------------------
+
+
+async def _run_prepasses(
+    *,
+    llm: LLMAdapter,
+    task: str,
+    container: InstanceContainer,
+    config: LoopConfig,
+) -> str:
+    """Run orient / planner pre-passes and return the augmented system prompt.
+
+    Neither pre-pass is allowed to break ``run_agent``. Each is wrapped
+    in a ``try/except`` that logs a warning and falls back to the
+    unaugmented baseline — this preserves the "flat ReAct works on its
+    own" invariant even if the upstream services (docker exec, LLM
+    endpoint) misbehave. The orient blob is passed as ``repo_context``
+    to the planner so the planner can cite real files instead of
+    hallucinating paths.
+    """
+    prompt = config.system_prompt
+
+    orient_blob = ""
+    if config.use_orient:
+        try:
+            from pare.agent.orient_v2 import (
+                format_orient_for_system_prompt,
+                run_orient,
+            )
+
+            orient_blob = await run_orient(container)
+            prompt += format_orient_for_system_prompt(orient_blob)
+        except Exception as e:
+            logger.warning("use_orient pre-pass raised, continuing: %s", e)
+            orient_blob = ""
+
+    if config.use_planner:
+        try:
+            from pare.agent.planner_v2 import (
+                format_plan_for_system_prompt,
+                run_planner,
+            )
+
+            plan = await run_planner(
+                llm=llm,
+                task=task,
+                # Cap the context we feed the planner so it doesn't
+                # dominate the prompt — the repo map can be long.
+                repo_context=orient_blob[:2000] if orient_blob else "",
+                instance_id=getattr(container, "instance_id", ""),
+            )
+            prompt += format_plan_for_system_prompt(plan)
+        except Exception as e:
+            logger.warning("use_planner pre-pass raised, continuing: %s", e)
+
+    return prompt
 
 
 def _build_initial_messages(system_prompt: str, task: str) -> list[Message]:

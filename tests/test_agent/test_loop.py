@@ -241,6 +241,133 @@ async def test_end_turn() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pre_passes_inject_into_system_prompt() -> None:
+    """``use_orient`` / ``use_planner`` must augment the system prompt.
+
+    We run the loop with both switches on and a FakeLLM that ends on turn
+    1 (no tool calls). The loop's first LLM call should receive a system
+    message whose content contains both the orient blob marker
+    ("Repository Context") and the planner marker ("Suggested Approach").
+    """
+
+    orient_llm = FakeLLM([
+        _resp(
+            content="nothing to do",
+            tool_calls=[],
+            stop_reason=LLMStopReason.END_TURN,
+        ),
+    ])
+
+    # Intercept planner_v2.run_planner by monkey-patching FakeLLM to
+    # serve both calls: first is the planner's one-shot (returns a plan),
+    # second is the main-loop's agent call (returns end_turn).
+    planner_and_main_llm = FakeLLM([
+        _resp(
+            content="## Plan\n1. Check foo.py.",
+            tool_calls=[],
+            stop_reason=LLMStopReason.END_TURN,
+        ),
+        _resp(
+            content="nothing to do",
+            tool_calls=[],
+            stop_reason=LLMStopReason.END_TURN,
+        ),
+    ])
+
+    container = FakeContainer(
+        files={"/testbed/README.md": "# Hello\n"},
+    )
+
+    # Monkey-patch container.exec so orient's ls / git ls-files calls
+    # succeed with minimal output. FakeContainer's default exec returns
+    # exit_code=0 and empty stdout — enough for the top-listing to be
+    # skipped and the repo_map to produce nothing, leaving just the
+    # README section.
+    registry = create_default_registry()
+
+    result = await run_agent(
+        llm=planner_and_main_llm,
+        task="fix it",
+        container=container,
+        registry=registry,
+        config=LoopConfig(
+            system_prompt="BASE PROMPT",
+            max_steps=3,
+            use_orient=True,
+            use_planner=True,
+        ),
+    )
+
+    # Two LLM calls total: planner pre-pass + one main-loop turn.
+    assert planner_and_main_llm.call_count == 2
+    # stop_reason unchanged by pre-passes.
+    assert result.stop_reason == "end_turn"
+
+    # Inspect the main-loop call's system message (messages[0] of the
+    # stored conversation in the result).
+    system_msg = result.messages[0]
+    assert system_msg.role == "system"
+    system_text = (
+        system_msg.content
+        if isinstance(system_msg.content, str)
+        else "".join(b.text for b in system_msg.content)
+    )
+    assert "BASE PROMPT" in system_text
+    assert "Repository Context" in system_text
+    assert "Suggested Approach" in system_text
+    # The actual plan text ended up in there, not a stub.
+    assert "Check foo.py" in system_text
+
+
+@pytest.mark.asyncio
+async def test_pre_pass_failure_does_not_break_loop() -> None:
+    """If orient_v2.run_orient raises, the loop must still run cleanly."""
+
+    llm = FakeLLM([
+        _resp(
+            content="nothing",
+            tool_calls=[],
+            stop_reason=LLMStopReason.END_TURN,
+        ),
+    ])
+
+    class ExplodingContainer(FakeContainer):
+        async def read_file(self, path, *, max_bytes=1_000_000):
+            raise RuntimeError("disk on fire")
+
+        async def exec(self, cmd, *, timeout=60.0, cwd=None, env=None):
+            raise RuntimeError("docker on fire")
+
+    container = ExplodingContainer()
+    registry = create_default_registry()
+
+    # use_orient=True but container blows up on every read/exec. run_orient
+    # catches at top level and returns "". Loop should proceed normally.
+    result = await run_agent(
+        llm=llm,
+        task="go",
+        container=container,
+        registry=registry,
+        config=LoopConfig(
+            system_prompt="BASE",
+            max_steps=2,
+            use_orient=True,
+        ),
+    )
+    assert result.stop_reason == "end_turn"
+    # No crash, no pre-pass marker in system prompt — just the BASE we set.
+    system_msg = result.messages[0]
+    assert system_msg.role == "system"
+    system_text = (
+        system_msg.content
+        if isinstance(system_msg.content, str)
+        else "".join(b.text for b in system_msg.content)
+    )
+    assert "BASE" in system_text
+    assert "Repository Context" not in system_text
+
+
+@pytest.mark.asyncio
 async def test_llm_exception_yields_error_exit() -> None:
     """Any exception from llm.chat → stop_reason='error', no tier2."""
 
