@@ -81,12 +81,19 @@ class LoopConfig:
     max_tool_result_lines: int = 200
     # Advisory nudge when the last N steps contain no file_edit/file_create.
     no_edit_nudge_after: int = 6
+    # Advisory nudge when the last N steps contain file_edit(s) but zero
+    # bash — i.e. the "edit blindly without testing" B2.1 Wrong-Fix signature
+    # observed on sympy__sympy-12489 (50 steps, 15 edits, 0 bash, tier2=False).
+    # Gated on ``use_test_nudge`` so v7/v8 baselines remain byte-identical
+    # when the switch is off.
+    no_test_nudge_after: int = 5
     # --- tier2 finalize hook ------------------------------------------------
     verify_instance_id: Optional[str] = None  # set → tier2 runs after loop
     checkpoint_enabled: bool = True
     # --- ablation switches (plan.md §5.4.3) ---------------------------------
     use_orient: bool = False
     use_planner: bool = False
+    use_test_nudge: bool = False
 
 
 @dataclass(slots=True)
@@ -170,6 +177,42 @@ def _maybe_nudge(events: list[ToolCallEvent], threshold: int) -> Optional[str]:
     return _NO_EDIT_NUDGE
 
 
+_NO_TEST_NUDGE = (
+    "[advisory] You have edited files recently but not run a test or script. "
+    "Before editing further, invoke bash to execute the failing test "
+    "(e.g. `python -m pytest <test_path> -x`) or a minimal reproducer, so "
+    "you can tell whether your edits actually work. Blind editing without "
+    "runtime feedback is the most common cause of wrong fixes."
+)
+
+
+def _maybe_test_nudge(
+    events: list[ToolCallEvent], threshold: int,
+) -> Optional[str]:
+    """Return advisory text when the agent edits without testing.
+
+    Fires when the last ``threshold`` events contain at least one
+    ``file_edit``/``file_create`` and zero ``bash``. This is the B2.1
+    "Wrong Fix" signature from sympy__sympy-12489 — the agent revises a
+    file repeatedly without ever running the test to check the revision.
+
+    Ablation-gated via ``LoopConfig.use_test_nudge`` so turning the switch
+    off reproduces the v7/v8 behaviour exactly; turning it on lets us
+    measure whether earlier test invocations shift trajectories off the
+    B2.1 label into verified_with_recovery.
+    """
+    if threshold <= 0 or len(events) < threshold:
+        return None
+    recent = events[-threshold:]
+    has_edit = any(
+        e.tool_name in ("file_edit", "file_create") for e in recent
+    )
+    has_bash = any(e.tool_name == "bash" for e in recent)
+    if has_edit and not has_bash:
+        return _NO_TEST_NUDGE
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -220,9 +263,18 @@ async def run_agent(
         exec_target="container",
     )
 
+    # Optional pre-passes (orient + planner). They run before the main
+    # loop and only mutate the system prompt — never the control flow.
+    # Both fail open: if they raise or return empty, we fall through to
+    # the unaugmented baseline. `use_orient` runs first so its blob can
+    # feed into the planner's user message as repo_context.
+    effective_system_prompt = await _run_prepasses(
+        llm=llm, task=task, container=container, config=config,
+    )
+
     state = _LoopState(
         base_commit=base_commit,
-        messages=_build_initial_messages(config.system_prompt, task),
+        messages=_build_initial_messages(effective_system_prompt, task),
         events=[],
         global_index=0,
         total_usage=TokenUsage(input_tokens=0, output_tokens=0),
@@ -230,10 +282,21 @@ async def run_agent(
 
     # ---- main loop ---------------------------------------------------------
     for step in range(config.max_steps):
-        # 1. optional advisory nudge (inject as a user-role system-style hint)
+        # 1. optional advisory nudge (inject as a user-role system-style hint).
+        # The test-nudge is gated on the ablation switch; the edit-nudge
+        # fires unconditionally as it did before. Both route through the
+        # same user-role injection so the LLM sees a single advisory.
         nudge = _maybe_nudge(state.events, config.no_edit_nudge_after)
         if nudge is not None:
             state.messages.append(Message(role="user", content=nudge))
+        if config.use_test_nudge:
+            test_nudge = _maybe_test_nudge(
+                state.events, config.no_test_nudge_after,
+            )
+            if test_nudge is not None:
+                state.messages.append(
+                    Message(role="user", content=test_nudge),
+                )
 
         # 2. LLM call — any exception → unified error exit
         try:
@@ -358,6 +421,61 @@ async def run_agent(
 # ---------------------------------------------------------------------------
 # Helpers (loop body only sets state; _finalize builds LoopResult)
 # ---------------------------------------------------------------------------
+
+
+async def _run_prepasses(
+    *,
+    llm: LLMAdapter,
+    task: str,
+    container: InstanceContainer,
+    config: LoopConfig,
+) -> str:
+    """Run orient / planner pre-passes and return the augmented system prompt.
+
+    Neither pre-pass is allowed to break ``run_agent``. Each is wrapped
+    in a ``try/except`` that logs a warning and falls back to the
+    unaugmented baseline — this preserves the "flat ReAct works on its
+    own" invariant even if the upstream services (docker exec, LLM
+    endpoint) misbehave. The orient blob is passed as ``repo_context``
+    to the planner so the planner can cite real files instead of
+    hallucinating paths.
+    """
+    prompt = config.system_prompt
+
+    orient_blob = ""
+    if config.use_orient:
+        try:
+            from pare.agent.orient_v2 import (
+                format_orient_for_system_prompt,
+                run_orient,
+            )
+
+            orient_blob = await run_orient(container)
+            prompt += format_orient_for_system_prompt(orient_blob)
+        except Exception as e:
+            logger.warning("use_orient pre-pass raised, continuing: %s", e)
+            orient_blob = ""
+
+    if config.use_planner:
+        try:
+            from pare.agent.planner_v2 import (
+                format_plan_for_system_prompt,
+                run_planner,
+            )
+
+            plan = await run_planner(
+                llm=llm,
+                task=task,
+                # Cap the context we feed the planner so it doesn't
+                # dominate the prompt — the repo map can be long.
+                repo_context=orient_blob[:2000] if orient_blob else "",
+                instance_id=getattr(container, "instance_id", ""),
+            )
+            prompt += format_plan_for_system_prompt(plan)
+        except Exception as e:
+            logger.warning("use_planner pre-pass raised, continuing: %s", e)
+
+    return prompt
 
 
 def _build_initial_messages(system_prompt: str, task: str) -> list[Message]:

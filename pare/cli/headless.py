@@ -171,6 +171,7 @@ async def run_headless_flat_react(
     verify: bool = False,
     use_orient: bool = False,
     use_planner: bool = False,
+    use_test_nudge: bool = False,
     verbose: bool = False,
 ) -> int:
     """Flat ReAct headless runner — the sole headless entry point post-R5.
@@ -220,6 +221,7 @@ async def run_headless_flat_react(
         verify_instance_id=instance_id if verify else None,
         use_orient=use_orient,
         use_planner=use_planner,
+        use_test_nudge=use_test_nudge,
     )
 
     print(
