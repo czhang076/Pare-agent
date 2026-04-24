@@ -142,13 +142,18 @@ def _group_events_by_turn(
 ) -> list[list[Any]]:
     """Return events grouped by ``turn_id``, preserving turn order.
 
-    We assume the trajectory's event list is already sorted by
-    ``global_index`` (the recording loop guarantees this) — we just need
-    the contiguous-turn groups.
+    We sort by ``global_index`` defensively even though the recording
+    loop today guarantees this — any future resampler / deduper / hand
+    edit of the JSONL that reorders events would otherwise split one
+    assistant turn into two SFT rows with partial tool_calls, training
+    the student on a malformed conversation shape. Sort is cheap
+    (events per trajectory are O(100)) and makes the invariant
+    machine-enforced.
     """
+    sorted_events = sorted(events, key=lambda e: e.global_index)
     groups: list[list[Any]] = []
     current_turn: int | None = None
-    for evt in events:
+    for evt in sorted_events:
         if current_turn is None or evt.turn_id != current_turn:
             groups.append([evt])
             current_turn = evt.turn_id
@@ -277,6 +282,47 @@ def _load_labels_jsonl(path: Path) -> dict[str, dict[str, Any]]:
     return labels
 
 
+def _validate_labels_schema(
+    labels: dict[str, dict[str, Any]],
+    *,
+    require_is_toxic: bool,
+    require_outcome: bool,
+    require_contains_recovery: bool,
+    source: Path | str,
+) -> None:
+    """Loud-fail on missing keys that an active filter depends on.
+
+    Counter-pattern to ``dict.get(key)``'s silent falsy-default: if
+    ``drop_toxic=True`` and a label row has no ``is_toxic`` key, the
+    previous code treated that as ``False`` and the row passed. A mixed
+    batch of label-file versions would silently ship toxic rows into
+    the student corpus. We prefer a loud error the moment we detect it.
+    """
+    required: list[str] = []
+    if require_is_toxic:
+        required.append("is_toxic")
+    if require_outcome:
+        required.append("outcome")
+    if require_contains_recovery:
+        required.append("contains_recovery")
+    if not required:
+        return
+
+    missing: dict[str, list[str]] = {}
+    for tid, row in labels.items():
+        absent = [k for k in required if k not in row]
+        if absent:
+            missing[tid] = absent
+    if missing:
+        sample = dict(list(missing.items())[:3])
+        raise ValueError(
+            f"{source}: {len(missing)} label row(s) missing required keys "
+            f"{required} (active filters depend on them). "
+            f"Sample of offenders: {sample}. "
+            "Re-run the classifier or disable the filter."
+        )
+
+
 def _should_drop(
     record: TrajectoryRecord,
     label: dict[str, Any] | None,
@@ -359,6 +405,14 @@ def export_dataset(
             labels_jsonl = candidate
 
     labels = _load_labels_jsonl(labels_jsonl) if labels_jsonl else {}
+    if labels:
+        _validate_labels_schema(
+            labels,
+            require_is_toxic=drop_toxic,
+            require_outcome=include_outcomes_set is not None,
+            require_contains_recovery=include_recovery_only,
+            source=labels_jsonl if labels_jsonl else "<labels>",
+        )
 
     records = load_trajectory_jsonl(trajectory_jsonl)
 

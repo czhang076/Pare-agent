@@ -108,13 +108,25 @@ class FaultInjectionResult:
     the agent runner. We keep it as a dict here rather than parsed so
     this module doesn't pull in the full trajectory schema at import
     time — keeps the dependency graph shallow.
+
+    ``agent_exit_code`` sentinel contract:
+        - ``int``  — the agent_runner returned this exit code (any
+                    integer, including negative numbers like ``-1`` from
+                    subprocess wrappers)
+        - ``None`` — the agent_runner raised an exception before it
+                    could return. ``error`` carries the traceback
+                    summary in that case.
+
+        Use ``agent_exit_code is None`` (not ``== -1``) to detect
+        runner failures. The old ``-1`` sentinel was ambiguous because
+        real subprocesses can legitimately exit ``-1``.
     """
 
     instance_id: str
     fault_name: str
     applied_at: float
     agent_duration_s: float
-    agent_exit_code: int
+    agent_exit_code: int | None
     trajectory: dict[str, Any] = field(default_factory=dict)
     error: str = ""
 
@@ -225,19 +237,35 @@ STALE_TEST_CACHE = _register(
 )
 
 
+_WRONG_IMPORT_EXCLUDED_BASENAMES = frozenset({
+    "conftest.py",    # pytest collection bootstrap — breaking this changes
+                      # the fault mode from "import error at exec" to
+                      # "pytest collection error", not the B2.2 scenario
+                      # we advertise.
+    "setup.py",       # build entry point; poisoning it breaks `pip install
+                      # -e .` before the agent can even read the repo.
+    "__init__.py",    # package marker; typically near-empty and breaking
+                      # it cascades into *every* submodule import.
+})
+
+
 def _is_non_test_python_source(path: Path, workdir: Path) -> bool:
     """Precise filter for the wrong_import target search.
 
-    Avoids two false-positive modes a substring match hits:
+    Avoids false-positive target modes:
     - Windows tmp dirs named like ``test_xxx`` (host-path contamination)
     - Legit source files whose *parent directory* contains ``test`` as
-      a substring but isn't a test directory (e.g. ``contest/``).
+      a substring but isn't a test directory (e.g. ``contest/``)
+    - Repo-bootstrap files (``conftest.py``, ``setup.py``, ``__init__.py``)
+      whose failure mode isn't the B2.2 ModuleNotFoundError we want to
+      probe — see ``_WRONG_IMPORT_EXCLUDED_BASENAMES``.
 
     Rules:
     - exclude anything under a ``.git``, ``test``, or ``tests`` directory
       (case-insensitive) **relative to workdir**
     - exclude files whose basename starts with ``test_`` or ends in
       ``_test.py`` (Python test-discovery conventions)
+    - exclude basenames in ``_WRONG_IMPORT_EXCLUDED_BASENAMES``
     """
     try:
         rel_parts = path.relative_to(workdir).parts
@@ -248,6 +276,8 @@ def _is_non_test_python_source(path: Path, workdir: Path) -> bool:
         return False
     name = path.name.lower()
     if name.startswith("test_") or name.endswith("_test.py"):
+        return False
+    if name in _WRONG_IMPORT_EXCLUDED_BASENAMES:
         return False
     return True
 
@@ -376,13 +406,14 @@ def run_with_fault(
     token = fault.apply(workdir)
 
     start = time.time()
-    exit_code = -1
+    exit_code: int | None = None
     trajectory: dict[str, Any] = {}
     error_msg = ""
     try:
         exit_code, trajectory = agent_runner(instance_id, workdir)
     except Exception as e:  # noqa: BLE001 — we need to revert no matter what
         error_msg = f"{type(e).__name__}: {e}"
+        # exit_code stays None — the sentinel for "runner raised".
     finally:
         # Revert always. A half-reverted workdir is worse than an
         # unreverted one, but both are better than a silent leftover.

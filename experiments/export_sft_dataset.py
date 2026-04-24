@@ -141,11 +141,16 @@ def main(argv: list[str] | None = None) -> int:
         else Path(str(out_path) + ".report.json")
     )
 
-    system_prompt = args.system_prompt
-    if args.system_prompt_file:
-        system_prompt = Path(args.system_prompt_file).read_text(encoding="utf-8")
-
     try:
+        system_prompt = args.system_prompt
+        if args.system_prompt_file:
+            # Inside try: a missing/unreadable file should surface with
+            # the same [sft-export-failed] prefix as any downstream
+            # failure, not a bare Python traceback.
+            system_prompt = Path(args.system_prompt_file).read_text(
+                encoding="utf-8"
+            )
+
         report = export_dataset(
             traj_path,
             out_path,

@@ -160,3 +160,27 @@ class TestExportSftDatasetCli:
         assert code == 0
         obj = json.loads(out_path.read_text(encoding="utf-8").splitlines()[0])
         assert obj["messages"][0] == {"role": "system", "content": "FROM FILE"}
+
+    def test_main_missing_system_prompt_file_surfaces_as_cli_error(
+        self, tmp_path: Path, capsys
+    ):
+        """The file read happens inside the same ``try`` that wraps
+        ``export_dataset`` — a missing/unreadable file should produce a
+        ``[sft-export-failed]`` prefix + exit code 1, not a bare Python
+        traceback. Users piping stderr to logs should get a consistent
+        machine-parseable error shape."""
+        traj_path = tmp_path / "arm.jsonl"
+        out_path = tmp_path / "sft.jsonl"
+        _write_jsonl(traj_path, [_traj("t1")])
+        # sys_file path does not exist.
+        nonexistent = tmp_path / "does_not_exist.txt"
+
+        code = main([
+            "--trajectory-jsonl", str(traj_path),
+            "--output-jsonl", str(out_path),
+            "--system-prompt-file", str(nonexistent),
+            "--keep-toxic",
+        ])
+        assert code == 1
+        err = capsys.readouterr().err
+        assert "[sft-export-failed]" in err

@@ -430,3 +430,158 @@ class TestExportDatasetFilters:
         )
         assert report.rows_written == 1
         assert report.filters["labels_jsonl"] is not None
+
+
+# ---------------------------------------------------------------------------
+# Label schema validation (counter-pattern to silent ``dict.get`` defaults)
+# ---------------------------------------------------------------------------
+
+
+class TestLabelSchemaValidation:
+    """Anti-footgun: if the caller activates a filter that depends on a
+    label key and the labels file is missing that key, fail loudly at
+    load time rather than silently treating the key as ``False`` and
+    leaking toxic / non-recovery rows into the corpus."""
+
+    def _minimal_record_and_traj(self, tmp_path: Path) -> tuple[Path, Path]:
+        traj_path = tmp_path / "arm.jsonl"
+        out_path = tmp_path / "sft.jsonl"
+        _write_jsonl(
+            traj_path,
+            [
+                _record(
+                    trajectory_id="t1",
+                    events=[
+                        _event(turn_id=0, call_index_in_turn=0, global_index=0)
+                    ],
+                ).to_dict()
+            ],
+        )
+        return traj_path, out_path
+
+    def test_drop_toxic_requires_is_toxic_key(self, tmp_path: Path):
+        """Labels that predate the toxic field silently pass the filter
+        under ``.get()``. Require the key instead."""
+        traj, out = self._minimal_record_and_traj(tmp_path)
+        labels_path = tmp_path / "arm.labels.jsonl"
+        _write_jsonl(
+            labels_path,
+            [
+                {
+                    "trajectory_id": "t1",
+                    "outcome": "verified_one_shot",
+                    # is_toxic missing on purpose
+                }
+            ],
+        )
+        with pytest.raises(ValueError, match="is_toxic"):
+            export_dataset(
+                traj, out, labels_jsonl=labels_path, drop_toxic=True
+            )
+
+    def test_include_recovery_only_requires_contains_recovery_key(
+        self, tmp_path: Path
+    ):
+        traj, out = self._minimal_record_and_traj(tmp_path)
+        labels_path = tmp_path / "arm.labels.jsonl"
+        _write_jsonl(
+            labels_path,
+            [
+                {
+                    "trajectory_id": "t1",
+                    "outcome": "verified_one_shot",
+                    "is_toxic": False,
+                    # contains_recovery missing on purpose
+                }
+            ],
+        )
+        with pytest.raises(ValueError, match="contains_recovery"):
+            export_dataset(
+                traj,
+                out,
+                labels_jsonl=labels_path,
+                drop_toxic=True,
+                include_recovery_only=True,
+            )
+
+    def test_include_outcomes_requires_outcome_key(self, tmp_path: Path):
+        traj, out = self._minimal_record_and_traj(tmp_path)
+        labels_path = tmp_path / "arm.labels.jsonl"
+        _write_jsonl(
+            labels_path,
+            [
+                {
+                    "trajectory_id": "t1",
+                    "is_toxic": False,
+                    # outcome missing on purpose
+                }
+            ],
+        )
+        with pytest.raises(ValueError, match="outcome"):
+            export_dataset(
+                traj,
+                out,
+                labels_jsonl=labels_path,
+                include_outcomes={"verified_one_shot"},
+            )
+
+    def test_all_filters_off_accepts_minimal_labels(self, tmp_path: Path):
+        """No filters active → no keys required. Purely informational
+        label rows (e.g. ``{trajectory_id, notes}``) must still load."""
+        traj, out = self._minimal_record_and_traj(tmp_path)
+        labels_path = tmp_path / "arm.labels.jsonl"
+        _write_jsonl(
+            labels_path,
+            [{"trajectory_id": "t1", "notes": "informational only"}],
+        )
+        # drop_toxic=False, no outcome/recovery filters → zero requirements.
+        report = export_dataset(
+            traj,
+            out,
+            labels_jsonl=labels_path,
+            drop_toxic=False,
+        )
+        assert report.rows_written == 1
+
+
+# ---------------------------------------------------------------------------
+# Event grouping — defend against reordered input
+# ---------------------------------------------------------------------------
+
+
+class TestEventGroupingSortsByGlobalIndex:
+    """The loop guarantees append order today, but the grouper must not
+    depend on that — any future resampler / deduper / hand edit of the
+    JSONL that reorders events would otherwise split one assistant turn
+    into multiple SFT rows with partial tool_calls."""
+
+    def test_shuffled_input_still_groups_correctly(self):
+        """The grouper sorts by ``global_index`` before scanning, so
+        shuffled input produces the same grouping as in-order input.
+
+        We use a tiny duck-typed stand-in rather than the real
+        ``ToolCallEvent`` to keep this test focused on the grouper's
+        ordering invariant — the grouper only reads ``.turn_id`` and
+        ``.global_index``."""
+        from pare.trajectory.sft_export import _group_events_by_turn
+
+        class _E:  # minimal event stand-in
+            __slots__ = ("turn_id", "global_index", "tag")
+
+            def __init__(self, turn_id: int, global_index: int, tag: str):
+                self.turn_id = turn_id
+                self.global_index = global_index
+                self.tag = tag
+
+        # Turn 0 has two calls; turn 1 has one call. Feed them mixed.
+        shuffled = [
+            _E(turn_id=1, global_index=2, tag="X"),
+            _E(turn_id=0, global_index=1, tag="B"),
+            _E(turn_id=0, global_index=0, tag="A"),
+        ]
+        groups = _group_events_by_turn(shuffled)
+        # Two groups: turn 0 (two events), turn 1 (one event), in order.
+        assert [e.turn_id for e in groups[0]] == [0, 0]
+        assert [e.turn_id for e in groups[1]] == [1]
+        # Within turn 0, events are sorted by global_index (A then B).
+        assert [e.tag for e in groups[0]] == ["A", "B"]

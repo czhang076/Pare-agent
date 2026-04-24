@@ -183,6 +183,40 @@ class TestWrongImportFault:
         with pytest.raises(RuntimeError, match="no non-test .py file"):
             apply_fault("wrong_import", tmp_path)
 
+    def test_skips_conftest_setup_init_at_workdir_root(self, tmp_path: Path):
+        """Repo-bootstrap files (``conftest.py``, ``setup.py``,
+        ``__init__.py``) must not be selected as wrong_import targets.
+        Poisoning them changes the failure mode from "ModuleNotFoundError
+        at exec" to "pytest collection error" / "pip install break",
+        which is not the B2.2 scenario the fault claims to probe.
+
+        Real trigger: SWE-bench repos (django, sympy, astropy) all have
+        a root-level ``conftest.py`` whose name sorts before most
+        package files lexicographically, so the previous implementation
+        would pick it first."""
+        # Bootstrap files at root — all must be skipped.
+        (tmp_path / "conftest.py").write_text(
+            "import pytest\n", encoding="utf-8"
+        )
+        (tmp_path / "setup.py").write_text(
+            "from setuptools import setup\nsetup()\n", encoding="utf-8"
+        )
+        (tmp_path / "__init__.py").write_text("", encoding="utf-8")
+        # The one legitimate target lives in a package directory.
+        (tmp_path / "pkg").mkdir()
+        (tmp_path / "pkg" / "core.py").write_text(
+            '"""module."""\n', encoding="utf-8"
+        )
+
+        token = apply_fault("wrong_import", tmp_path)
+
+        target = Path(token["target"])
+        assert target.name == "core.py", (
+            f"expected pkg/core.py, got {target!r} — bootstrap files "
+            "leaked through the filter"
+        )
+        revert_fault("wrong_import", tmp_path, token)
+
 
 class TestEmptyBaselineFault:
     def test_apply_and_revert_are_no_ops(self, tmp_path: Path):
@@ -258,10 +292,36 @@ class TestRunWithFault:
             agent_runner=exploding_runner,
         )
 
-        assert result.agent_exit_code == -1
+        # Sentinel contract: None means "runner raised", distinct from
+        # any real integer exit code (including -1 from subprocess).
+        assert result.agent_exit_code is None
         assert "llm provider dropped" in result.error
         # Even after the agent raised, the workdir is clean.
         assert _snapshot_tree(tmp_path) == before
+
+    def test_real_negative_one_exit_is_not_the_raise_sentinel(
+        self, tmp_path: Path
+    ):
+        """A runner that legitimately returns -1 must produce
+        ``agent_exit_code == -1`` (an int), NOT the ``None`` sentinel
+        reserved for "runner raised". Distinguishes subprocess failure
+        from callback failure."""
+        _make_minimal_repo(tmp_path)
+
+        def subprocess_style_runner(*_args, **_kwargs):
+            # Real subprocess wrappers can legitimately surface -1.
+            return -1, {"trajectory_id": "t_x"}
+
+        result = run_with_fault(
+            fault_name="wrong_import",
+            instance_id="swe-sub",
+            workdir=tmp_path,
+            agent_runner=subprocess_style_runner,
+        )
+
+        assert result.agent_exit_code == -1
+        assert result.agent_exit_code is not None
+        assert result.error == ""
 
     def test_records_revert_failure_in_error_field(self, tmp_path: Path):
         """If the revert itself fails, both the agent error (if any)
