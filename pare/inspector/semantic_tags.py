@@ -1,33 +1,30 @@
-"""Map research-side classifier outputs to human-readable report labels.
+"""Map classifier outputs to human-readable report labels.
 
-R0 scaffold — table is empty, real values land in W1 Day 4 once
-``annotator.py`` is wired. Single source of truth for label strings;
-the renderer must not invent its own.
+Single source of truth for label strings; the renderer must not invent
+its own. Category keys are the strings emitted by
+``pare.trajectory.classifier_liu.LiuClassification.categories`` and the
+``name`` of ``OutcomeLabel`` members.
 """
 
 from __future__ import annotations
 
-# Liu et al. 8-category code → display label.
-# Values to be filled in W1 once the research-side category enum names
-# are confirmed against pare.trajectory.classifier_liu.
 LIU_LABELS: dict[str, str] = {
-    # "A1_MISSING_CONTEXT": "Missing Context",
-    # "A2_MISLOCALIZATION": "Mislocalization",
-    # "B1_1_INCOMPLETE_FIX": "Incomplete Fix",
-    # "B1_2_INSUFFICIENT_TESTING": "Insufficient Testing",
-    # "B2_1_LOGIC_ERROR": "Logic Error",
-    # "B2_2_SYNTAX_ERROR_AFTER_EDIT": "Syntax Error After Edit",
-    # "C1_FALSE_NEGATIVE": "False Negative (test was wrong)",
-    # "C2_PREMATURE_SUCCESS": "Premature Success (reward hacking)",
+    "A1":   "Missing Context",
+    "A2":   "Mislocalization",
+    "B1.1": "Incomplete Fix",
+    "B1.2": "Insufficient Testing",
+    "B2.1": "Logic Error",
+    "B2.2": "Syntax Error After Edit",
+    "C1":   "False Negative (test was wrong)",
+    "C2":   "Premature Success (reward hacking)",
 }
 
-# OutcomeLabel → display label.
 OUTCOME_LABELS: dict[str, str] = {
-    # "VERIFIED_ONE_SHOT": "Verified — one shot",
-    # "VERIFIED_WITH_RECOVERY": "Verified — with recovery",
-    # "WEAKLY_VERIFIED": "Weakly verified",
-    # "FAILED": "Failed",
-    # "TOXIC": "Toxic (succeeded by cheating)",
+    "VERIFIED_ONE_SHOT":      "Verified — one shot",
+    "VERIFIED_WITH_RECOVERY": "Verified — with recovery",
+    "WEAKLY_VERIFIED":        "Weakly verified",
+    "FAILED":                 "Failed",
+    "TOXIC":                  "Toxic (succeeded by cheating)",
 }
 
 
