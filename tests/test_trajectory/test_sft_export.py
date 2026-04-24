@@ -69,7 +69,7 @@ def _record(
         "llm_claimed_success": final_passed,
         "verification": {
             "final_passed": final_passed,
-            "tier1_pass": final_passed,
+            "has_diff": final_passed,
             "tier2_pass": final_passed,
             "tier2_command": "",
         },

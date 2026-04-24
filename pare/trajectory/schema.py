@@ -108,35 +108,69 @@ class TokenUsageSummary:
 
 @dataclass(frozen=True, slots=True)
 class VerificationResult:
+    """Outcome summary for one trajectory's final diff.
+
+    ``has_diff`` is literally "the agent wrote a non-empty diff" —
+    it is NOT a tier-1 verifier (no syntax check, no patch-apply
+    dry-run). The name was historically ``tier1_pass`` which was
+    misleading; v0.1.1 renames it end-to-end. Backward-compat read
+    (``from_dict``) accepts either key, but ``to_dict`` always writes
+    the new name so any round-trip upgrades the payload. See
+    ``docs/dataset_card.md`` §5 for the migration note.
+    """
+
     final_passed: bool
-    tier1_pass: bool
+    has_diff: bool
     tier2_pass: bool
     tier2_command: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "VerificationResult":
+        # Back-compat: accept old ``tier1_pass`` key from v0.1.0 payloads.
+        # This makes already-written trajectory JSONL + SFT metadata
+        # readable without a migration step. Write side is strict.
+        legacy_key = "tier1_pass"
+        new_key = "has_diff"
+        has_legacy = legacy_key in data
+        has_new = new_key in data
+        if has_legacy and has_new and data[legacy_key] != data[new_key]:
+            raise SchemaValidationError(
+                "verification: both 'tier1_pass' (legacy) and 'has_diff' "
+                "present with different values — ambiguous payload"
+            )
+        # Normalize: fabricate a dict with has_diff regardless of source.
+        normalized = dict(data)
+        if has_legacy and not has_new:
+            normalized[new_key] = normalized.pop(legacy_key)
+        elif has_legacy and has_new:
+            # Both present, same value — drop legacy so required-key
+            # set validates cleanly.
+            normalized.pop(legacy_key, None)
+
         _expect_keys(
-            data,
-            required={"final_passed", "tier1_pass", "tier2_pass"},
+            normalized,
+            required={"final_passed", "has_diff", "tier2_pass"},
             optional={"tier2_command"},
             context="verification",
         )
-        for key in ("final_passed", "tier1_pass", "tier2_pass"):
-            if not isinstance(data[key], bool):
+        for key in ("final_passed", "has_diff", "tier2_pass"):
+            if not isinstance(normalized[key], bool):
                 raise SchemaValidationError(f"verification.{key}: expected bool")
-        if "tier2_command" in data and not isinstance(data["tier2_command"], str):
+        if "tier2_command" in normalized and not isinstance(
+            normalized["tier2_command"], str
+        ):
             raise SchemaValidationError("verification.tier2_command: expected str")
         return cls(
-            final_passed=data["final_passed"],
-            tier1_pass=data["tier1_pass"],
-            tier2_pass=data["tier2_pass"],
-            tier2_command=data.get("tier2_command", ""),
+            final_passed=normalized["final_passed"],
+            has_diff=normalized["has_diff"],
+            tier2_pass=normalized["tier2_pass"],
+            tier2_command=normalized.get("tier2_command", ""),
         )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "final_passed": self.final_passed,
-            "tier1_pass": self.tier1_pass,
+            "has_diff": self.has_diff,
             "tier2_pass": self.tier2_pass,
             "tier2_command": self.tier2_command,
         }

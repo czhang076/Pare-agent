@@ -110,7 +110,7 @@ def _loop_result_to_record(
 
     verification = VerificationResult(
         final_passed=loop_result.success,
-        tier1_pass=loop_result.tier1_pass,
+        has_diff=loop_result.has_diff,
         tier2_pass=loop_result.tier2_pass,
         tier2_command=f"swebench:{instance_id}" if loop_result.tier2_enabled else "",
     )
@@ -282,7 +282,7 @@ async def run_headless_flat_react(
             "declared_status": loop_result.declared_status,
             "declared_summary": loop_result.declared_summary,
             "tool_call_count": loop_result.tool_call_count,
-            "tier1_pass": loop_result.tier1_pass,
+            "has_diff": loop_result.has_diff,
             "tier2_enabled": loop_result.tier2_enabled,
             "tier2_pass": loop_result.tier2_pass,
             "tier2_output": loop_result.tier2_output,

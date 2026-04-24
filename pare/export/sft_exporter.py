@@ -67,7 +67,7 @@ class SFTExporter:
                 "seed": trajectory.seed,
                 "llm_claimed_success": trajectory.llm_claimed_success,
                 "final_passed": trajectory.verification.final_passed,
-                "tier1_pass": trajectory.verification.tier1_pass,
+                "has_diff": trajectory.verification.has_diff,
                 "tier2_pass": trajectory.verification.tier2_pass,
                 "token_usage": trajectory.token_usage.to_dict(),
                 "export_source": source,
@@ -191,7 +191,7 @@ class SFTExporter:
             "Final summary: "
             f"llm_claimed_success={trajectory.llm_claimed_success}; "
             f"final_passed={verification.final_passed}; "
-            f"tier1_pass={verification.tier1_pass}; "
+            f"has_diff={verification.has_diff}; "
             f"tier2_pass={verification.tier2_pass}; "
             f"input_tokens={usage.input_tokens}; "
             f"output_tokens={usage.output_tokens}; "

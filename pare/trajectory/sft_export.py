@@ -233,7 +233,7 @@ def export_trajectory_to_sft(
         "seed": record.seed,
         "model": record.model,
         "final_passed": record.verification.final_passed,
-        "tier1_pass": record.verification.tier1_pass,
+        "has_diff": record.verification.has_diff,
         "tier2_pass": record.verification.tier2_pass,
         "input_tokens": record.token_usage.input_tokens,
         "output_tokens": record.token_usage.output_tokens,

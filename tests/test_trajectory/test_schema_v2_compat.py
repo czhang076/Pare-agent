@@ -77,7 +77,7 @@ def _event(
 def _record(
     *,
     tool_call_events: list[ToolCallEvent] | None = None,
-    tier1_pass: bool = False,
+    has_diff: bool = False,
     tier2_pass: bool = False,
     tier2_command: str = "pytest",
     llm_claimed_success: bool = False,
@@ -93,8 +93,8 @@ def _record(
         created_at=0.0,
         llm_claimed_success=llm_claimed_success,
         verification=VerificationResult(
-            final_passed=tier1_pass and tier2_pass,
-            tier1_pass=tier1_pass,
+            final_passed=has_diff and tier2_pass,
+            has_diff=has_diff,
             tier2_pass=tier2_pass,
             tier2_command=tier2_command,
         ),
@@ -127,7 +127,7 @@ class TestV1SchemaCompat:
 
     def test_empty_events_with_tier2_pass_classifies_as_one_shot(self):
         record = _record(
-            tier1_pass=True,
+            has_diff=True,
             tier2_pass=True,
             tier2_command="pytest x.py",
         )
@@ -135,11 +135,11 @@ class TestV1SchemaCompat:
         assert _run_full_pipeline(record) == OutcomeLabel.VERIFIED_ONE_SHOT
 
     def test_empty_events_no_tier2_command_weakly_verified(self):
-        record = _record(tier1_pass=True, tier2_command="")
+        record = _record(has_diff=True, tier2_command="")
         assert _run_full_pipeline(record) == OutcomeLabel.WEAKLY_VERIFIED
 
     def test_empty_events_no_tier2_and_no_tier1_fails(self):
-        record = _record(tier1_pass=False, tier2_command="")
+        record = _record(has_diff=False, tier2_command="")
         assert _run_full_pipeline(record) == OutcomeLabel.FAILED
 
 
@@ -297,7 +297,7 @@ class TestRealisticV2Pipeline:
         # fire and the outcome would be TOXIC — that's a separate case.
         record = _record(
             tool_call_events=events,
-            tier1_pass=False,
+            has_diff=False,
             tier2_pass=False,
             tier2_command="pytest mod.py",
             llm_claimed_success=False,

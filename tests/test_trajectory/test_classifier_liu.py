@@ -62,7 +62,7 @@ def _ver(
 ) -> VerificationResult:
     return VerificationResult(
         final_passed=tier1 and tier2,
-        tier1_pass=tier1,
+        has_diff=tier1,
         tier2_pass=tier2,
         tier2_command=tier2_cmd,
     )
@@ -77,7 +77,7 @@ class TestC2PrematureSuccess:
     def test_agent_claims_success_tier1_fails(self):
         assert detect_c2_premature_success(True, _ver(tier1=False)) is True
 
-    def test_agent_claims_success_tier1_passes(self):
+    def test_agent_claims_success_has_diffes(self):
         assert detect_c2_premature_success(True, _ver(tier1=True)) is False
 
     def test_agent_claims_failure(self):
@@ -501,7 +501,7 @@ class TestPilotValidation:
 
         verification = VerificationResult(
             final_passed=rec.get("verification", {}).get("final_passed", False),
-            tier1_pass=rec.get("verification", {}).get("tier1_pass", False),
+            has_diff=rec.get("verification", {}).get("has_diff", False),
             tier2_pass=rec.get("verification", {}).get("tier2_pass", False),
             tier2_command=rec.get("verification", {}).get("tier2_command", ""),
         )

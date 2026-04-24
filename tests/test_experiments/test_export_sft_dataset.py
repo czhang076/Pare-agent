@@ -27,7 +27,7 @@ def _traj(trajectory_id: str) -> dict:
         "llm_claimed_success": True,
         "verification": {
             "final_passed": True,
-            "tier1_pass": True,
+            "has_diff": True,
             "tier2_pass": True,
             "tier2_command": "",
         },

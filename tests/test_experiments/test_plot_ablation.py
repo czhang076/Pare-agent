@@ -65,7 +65,7 @@ def _traj(
         },
         "verification": {
             "final_passed": success,
-            "tier1_pass": success,
+            "has_diff": success,
             "tier2_pass": success,
             "tier2_command": "",
         },
