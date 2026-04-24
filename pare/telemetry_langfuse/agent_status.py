@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
-    from pare_research.trajectory.schema_v2 import ToolCallEvent  # type: ignore[import-not-found]
+    from pare.trajectory.schema_v2 import ToolCallEvent
 
 
 AgentStatus = Literal["success", "dead_end", "retrying", "error"]

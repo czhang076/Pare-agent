@@ -7,8 +7,8 @@ license = "MIT"
 
 # Pare 2.0 is observer-only: a Trajectory Inspector CLI that consumes
 # JSONL agent traces, classifies failures, and renders side-by-side HTML
-# diff reports. Runtime primitives (loop, container, classifiers) live in
-# the research repo (pare-research). This package depends on it as a lib.
+# diff reports. The trajectory schema + classifiers are vendored under
+# pare/trajectory/ from the research branch (claude/great-carson-333acd).
 dependencies = [
     # HTML report rendering
     "jinja2>=3.1",
@@ -19,13 +19,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Research primitives (schema_v2, classifier_liu, recovery_detector_v2,
-# error_signal_extractor) — installed from the research branch as a lib.
-# Pinned to a branch ref until research lands on main.
-research = [
-    "pare-research @ git+https://github.com/czhang076/Pare-agent.git@claude/great-carson-333acd",
-]
-
 # W3 Langfuse emitter + W4 Agent Graph integration.
 langfuse = [
     "langfuse>=2.0",

@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from pare_research.trajectory.schema_v2 import ToolCallEvent  # type: ignore[import-not-found]
+    from pare.trajectory.schema_v2 import ToolCallEvent
 
     from pare.inspector.annotator import AnnotatedTrajectory
 

@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from pare_research.trajectory.schema_v2 import TrajectoryRecord  # type: ignore[import-not-found]
+    from pare.trajectory.schema import TrajectoryRecord
 
     from pare.telemetry_langfuse.config import LangfuseConfig
 

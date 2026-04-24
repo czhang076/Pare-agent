@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from pare_research.trajectory.schema_v2 import ToolCallEvent  # type: ignore[import-not-found]
+    from pare.trajectory.schema_v2 import ToolCallEvent
 
     from pare.telemetry_langfuse.config import LangfuseConfig
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 # Liu et al. 8-category code → display label.
 # Values to be filled in W1 once the research-side category enum names
-# are confirmed against pare_research.trajectory.classifier_liu.
+# are confirmed against pare.trajectory.classifier_liu.
 LIU_LABELS: dict[str, str] = {
     # "A1_MISSING_CONTEXT": "Missing Context",
     # "A2_MISLOCALIZATION": "Mislocalization",
