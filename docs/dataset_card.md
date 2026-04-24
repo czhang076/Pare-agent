@@ -1,12 +1,21 @@
 ---
 dataset_name: pare-recovery-sft-swebench20-v0
-version: 0.1.0-pilot
+version: 0.1.1-pilot
 schema: openai-chat
 license: MIT
 source_tasks: princeton-nlp/SWE-bench_Verified
 generation_provider: minimax (MiniMax-M2.5)
 classifier: rule-based (Liu et al. 2025 taxonomy + L1/L2/L3 recovery)
 status: pilot — not for capability claims
+changelog:
+  - 0.1.1-pilot: renamed metadata key ``tier1_pass`` → ``has_diff`` to
+    match its actual semantics (agent produced a non-empty diff; not a
+    real tier-1 verifier). Migration script:
+    ``scripts/migrate_v0_sft_metadata.py``. Back-compat reader accepts
+    either key; writers always emit ``has_diff``.
+  - 0.1.0-pilot: initial release — 3-arm sympy20 pilot, 20 tasks,
+    seed 0, MiniMax-M2.5 generator. 38 recovery-only SFT rows across
+    three arms, 30 all-verified rows (one arm empty).
 ---
 
 # Pare Recovery-SFT Dataset — v0 pilot card
@@ -55,7 +64,7 @@ self-correct at tool-call granularity.
     "seed": 0,
     "model": "MiniMax-M2.5",
     "final_passed": true,
-    "tier1_pass": true, "tier2_pass": true,
+    "has_diff": true, "tier2_pass": true,
     "input_tokens": 151738, "output_tokens": 4106,
     "tool_call_count": 19,
     "outcome": "verified_with_recovery",
@@ -83,6 +92,25 @@ Key format decisions:
 - **One assistant message per `turn_id`** with all parallel tool_calls
   of that turn, followed by one `tool` reply per call in order. This
   preserves the ReAct cadence the agent was actually recorded in.
+
+### 2.1 Schema note — `has_diff` (renamed from `tier1_pass` in 0.1.1)
+
+The `metadata.has_diff` field is literally "the agent produced a
+non-empty final diff". It is **not** a tier-1 syntax/compile verifier —
+Pare does not (yet) implement one. v0.1.0 called this field `tier1_pass`
+which was misleading; v0.1.1 renames it end-to-end.
+
+- **Loader behaviour:** `VerificationResult.from_dict` accepts either
+  key, so v0.1.0 JSONL still loads. Serializers always emit `has_diff`.
+- **Migration:** run `scripts/migrate_v0_sft_metadata.py <files...>`
+  to rewrite v0.1.0 files in place (idempotent, writes a
+  `*.v0_1_0.bak` sidecar by default).
+- **Analysis note:** any paper-table query or composition sampler that
+  filtered on `metadata.tier1_pass` must now filter on
+  `metadata.has_diff`. The semantic is unchanged.
+
+If you need a real tier-1 verifier in the future, add a *new* field
+(`metadata.tier1_pass`) — it's forward-compatible.
 
 ## 3. Collection protocol
 
