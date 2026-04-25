@@ -44,6 +44,16 @@ pare = "pare.main:main"
 requires = ["setuptools>=75.0"]
 build-backend = "setuptools.build_meta"
 
+# Both ``pare/`` and ``experiments/`` live at the repo root. Without an
+# explicit packages list, setuptools' flat-layout auto-discovery refuses
+# to build with "Multiple top-level packages discovered". Listing them
+# explicitly lets ``pip install -e ".[dev]"`` succeed on any platform.
+# ``experiments`` is shipped because trajectory generation re-imports
+# it (e.g. ``GenerationTask`` from generate_trajectories).
+[tool.setuptools.packages.find]
+include = ["pare*", "experiments*"]
+exclude = ["tests*", "scripts*"]
+
 [tool.ruff]
 target-version = "py312"
 line-length = 100
