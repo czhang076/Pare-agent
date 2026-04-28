@@ -127,9 +127,7 @@ pytest tests/test_experiments    # pipeline scripts
 
 ## References
 
-[1] Liu et al. (2025). *A Taxonomy of Failure Modes in LLM-Based Coding Agents.*
-    The 9-category Liu taxonomy (A1/A2, B1.1/B1.2, B2.1/B2.2, C1/C2, D) is the
-    classification target.
+[1] Liu et al. (2025).
 
 ## License
 
