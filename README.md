@@ -214,15 +214,7 @@ pytest tests/test_scripts           # migration script
 
 ## References
 
-- Liu et al. (2025). *A Taxonomy of Failure Modes in LLM-Based Coding
-  Agents.* The 9-category taxonomy (A1/A2, B1.1/B1.2, B2.1/B2.2,
-  C1/C2, D) is the classification target.
-- Kumar et al. (2024). *Training Language Models to Self-Correct via
-  Reinforcement Learning (SCoRe).* Orthogonal — SCoRe targets CoT
-  self-correction on math; Pare studies *tool-call-level*
-  self-correction on code, where errors are externally observable.
-- Jimenez et al. (2024). *SWE-bench: Can Language Models Resolve
-  Real-World GitHub Issues?* Task source.
+- Liu et al. (2025).
 
 ## License
 
