@@ -32,19 +32,29 @@ from pare.trajectory.schema import (
     load_trajectory_jsonl,
     write_trajectory_jsonl,
 )
+from pare.trajectory.sft_export import (
+    ExportReport,
+    SFTRow,
+    export_dataset,
+    export_trajectory_to_sft,
+)
 
 __all__ = [
     "append_trajectory_jsonl",
+    "ExportReport",
     "RecoveryDetectionResult",
     "RecoveryEvent",
     "RecoveryLevel",
     "SCHEMA_VERSION",
     "SchemaValidationError",
+    "SFTRow",
     "StepAttempt",
     "TokenUsageSummary",
     "TrajectoryRecord",
     "VerificationResult",
     "detect_recovery_events",
+    "export_dataset",
+    "export_trajectory_to_sft",
     "load_trajectory_jsonl",
     "write_trajectory_jsonl",
 ]

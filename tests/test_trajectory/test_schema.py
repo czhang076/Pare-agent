@@ -32,7 +32,7 @@ def _sample_payload() -> dict:
         "llm_claimed_success": True,
         "verification": {
             "final_passed": True,
-            "tier1_pass": True,
+            "has_diff": True,
             "tier2_pass": True,
             "tier2_command": "pytest tests/",
         },
@@ -141,3 +141,51 @@ class TestSchemaValidation:
 
         with pytest.raises(SchemaValidationError):
             TrajectoryRecord.from_dict(payload)
+
+
+class TestHasDiffBackCompat:
+    """v0.1.0 wrote ``tier1_pass`` where v0.1.1+ writes ``has_diff``.
+
+    The field always meant "final_diff non-empty" — the rename is
+    purely a naming fix. The reader must accept old payloads without a
+    migration step (so existing trajectory JSONL + SFT metadata is
+    still loadable) while the writer always emits the new name so any
+    round-trip upgrades the payload in place.
+    """
+
+    def test_from_dict_accepts_legacy_tier1_pass_key(self):
+        payload = _sample_payload()
+        # Simulate a v0.1.0 payload: strip has_diff, re-add the old key.
+        legacy_value = payload["verification"].pop("has_diff")
+        payload["verification"]["tier1_pass"] = legacy_value
+
+        record = TrajectoryRecord.from_dict(payload)
+        assert record.verification.has_diff is legacy_value
+
+    def test_to_dict_always_writes_has_diff(self):
+        payload = _sample_payload()
+        legacy_value = payload["verification"].pop("has_diff")
+        payload["verification"]["tier1_pass"] = legacy_value
+
+        record = TrajectoryRecord.from_dict(payload)
+        out = record.to_dict()
+        # Old key must be gone; new key present.
+        assert "tier1_pass" not in out["verification"]
+        assert out["verification"]["has_diff"] is legacy_value
+
+    def test_conflicting_legacy_and_new_key_raises(self):
+        """If a payload somehow carries both keys with different values,
+        we can't decide safely — refuse instead of silently preferring
+        one. Same-value duplicates are allowed (idempotent upgrade)."""
+        payload = _sample_payload()
+        payload["verification"]["tier1_pass"] = (
+            not payload["verification"]["has_diff"]
+        )
+        with pytest.raises(SchemaValidationError, match="ambiguous"):
+            TrajectoryRecord.from_dict(payload)
+
+    def test_same_value_legacy_and_new_key_accepted(self):
+        payload = _sample_payload()
+        payload["verification"]["tier1_pass"] = payload["verification"]["has_diff"]
+        record = TrajectoryRecord.from_dict(payload)
+        assert record.verification.has_diff is payload["verification"]["has_diff"]

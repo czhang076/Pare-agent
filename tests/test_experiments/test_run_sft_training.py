@@ -33,7 +33,7 @@ def _record(trajectory_id: str) -> TrajectoryRecord:
         llm_claimed_success=True,
         verification=VerificationResult(
             final_passed=True,
-            tier1_pass=True,
+            has_diff=True,
             tier2_pass=False,
             tier2_command="",
         ),

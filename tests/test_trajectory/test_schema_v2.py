@@ -60,7 +60,7 @@ def _sample_trajectory_with_events() -> dict:
         "llm_claimed_success": True,
         "verification": {
             "final_passed": True,
-            "tier1_pass": True,
+            "has_diff": True,
             "tier2_pass": True,
         },
         "attempts": [
@@ -369,7 +369,7 @@ class TestTrajectoryRecordWithEvents:
             "llm_claimed_success": True,
             "verification": {
                 "final_passed": True,
-                "tier1_pass": True,
+                "has_diff": True,
                 "tier2_pass": False,
             },
         }

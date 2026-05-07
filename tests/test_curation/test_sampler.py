@@ -4,7 +4,7 @@ Fixtures are tuned to the Liu v2 ``assign_outcome_label`` contract (post-R4
 sampler port):
 
 - ``VERIFIED_ONE_SHOT`` / ``VERIFIED_WITH_RECOVERY`` both require a
-  non-empty ``tier2_command`` AND ``tier1_pass=True``/``tier2_pass=True``;
+  non-empty ``tier2_command`` AND ``has_diff=True``/``tier2_pass=True``;
   that's why the default ``_record(tier2_command="pytest")`` is used for
   the ``os-*`` / ``fr-*`` pools.
 - ``WEAKLY_VERIFIED`` is the Tier-2-not-configured branch, so ``wv-1``
@@ -52,7 +52,7 @@ def _record(
     task: str = "Fix bug",
     llm_claimed_success: bool,
     final_passed: bool,
-    tier1_pass: bool,
+    has_diff: bool,
     tier2_pass: bool,
     attempts: list[StepAttempt],
     tokens: int,
@@ -70,7 +70,7 @@ def _record(
         llm_claimed_success=llm_claimed_success,
         verification=VerificationResult(
             final_passed=final_passed,
-            tier1_pass=tier1_pass,
+            has_diff=has_diff,
             tier2_pass=tier2_pass,
             tier2_command=tier2_command,
         ),
@@ -154,7 +154,7 @@ def _dataset() -> list[TrajectoryRecord]:
             "os-1",
             llm_claimed_success=True,
             final_passed=True,
-            tier1_pass=True,
+            has_diff=True,
             tier2_pass=True,
             attempts=_one_shot_attempt(),
             tokens=100,
@@ -163,7 +163,7 @@ def _dataset() -> list[TrajectoryRecord]:
             "os-2",
             llm_claimed_success=True,
             final_passed=True,
-            tier1_pass=True,
+            has_diff=True,
             tier2_pass=True,
             attempts=_one_shot_attempt(),
             tokens=120,
@@ -172,7 +172,7 @@ def _dataset() -> list[TrajectoryRecord]:
             "os-3",
             llm_claimed_success=True,
             final_passed=True,
-            tier1_pass=True,
+            has_diff=True,
             tier2_pass=True,
             attempts=_one_shot_attempt(),
             tokens=80,
@@ -182,7 +182,7 @@ def _dataset() -> list[TrajectoryRecord]:
             "fr-1",
             llm_claimed_success=True,
             final_passed=True,
-            tier1_pass=True,
+            has_diff=True,
             tier2_pass=True,
             attempts=_recovery_attempts(),
             tokens=90,
@@ -192,7 +192,7 @@ def _dataset() -> list[TrajectoryRecord]:
             "fr-2",
             llm_claimed_success=True,
             final_passed=True,
-            tier1_pass=True,
+            has_diff=True,
             tier2_pass=True,
             attempts=_recovery_attempts(),
             tokens=110,
@@ -204,7 +204,7 @@ def _dataset() -> list[TrajectoryRecord]:
             "wv-1",
             llm_claimed_success=True,
             final_passed=True,
-            tier1_pass=True,
+            has_diff=True,
             tier2_pass=False,
             attempts=_one_shot_attempt(),
             tokens=70,
@@ -214,7 +214,7 @@ def _dataset() -> list[TrajectoryRecord]:
             "fd-1",
             llm_claimed_success=False,
             final_passed=False,
-            tier1_pass=True,
+            has_diff=True,
             tier2_pass=False,
             attempts=[
                 StepAttempt(
@@ -234,7 +234,7 @@ def _dataset() -> list[TrajectoryRecord]:
             "tx-1",
             llm_claimed_success=True,
             final_passed=False,
-            tier1_pass=False,
+            has_diff=False,
             tier2_pass=False,
             attempts=[],
             tokens=50,
@@ -297,7 +297,7 @@ class TestTokenBudgetSampler:
                 "fr-only",
                 llm_claimed_success=True,
                 final_passed=True,
-                tier1_pass=True,
+                has_diff=True,
                 tier2_pass=True,
                 attempts=_recovery_attempts(),
                 tokens=100,

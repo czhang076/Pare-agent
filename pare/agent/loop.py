@@ -119,7 +119,8 @@ class LoopResult:
         default_factory=lambda: TokenUsage(input_tokens=0, output_tokens=0)
     )
     # --- verification signals (independent of declared_status) --------------
-    tier1_pass: bool = False
+    has_diff: bool = False  # agent wrote a non-empty final_diff — was
+                            # misleadingly named ``tier1_pass`` in v0.1.0
     tier2_enabled: bool = False
     tier2_pass: bool = False
     tier2_output: str = ""
@@ -629,7 +630,7 @@ async def _finalize(
         tool_call_events=list(state.events),
         messages=list(state.messages),
         total_usage=state.total_usage,
-        tier1_pass=bool(final_diff and final_diff.strip()),
+        has_diff=bool(final_diff and final_diff.strip()),
         tier2_enabled=tier2_enabled,
         tier2_pass=tier2_pass,
         tier2_output=tier2_output,

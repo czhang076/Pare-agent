@@ -158,19 +158,20 @@ def detect_b21_logic_error(
     """B2.1: Logic Error — Tier 2 test fails with assertion error.
 
     Conditions (all must hold):
-    1. Tier 1 passed (code is structurally valid — compiles, non-empty diff).
-       Logic errors by definition mean the code runs but produces wrong
-       results; if Tier 1 fails, the problem is structural, not semantic.
+    1. The agent produced a non-empty diff (``has_diff``). Logic errors
+       by definition mean code that runs but produces wrong results; if
+       there's no diff at all, the problem isn't logic.
     2. Tier 2 was configured (tier2_command non-empty) AND failed
     3. The trajectory contains TEST_FAILURE events with assertion-pattern
        content that is NOT explained by syntax/import errors
 
     If Tier 2 failed but no TEST_FAILURE event with assertion content
     exists in the trajectory (e.g. tests were run externally by the
-    verifier), falls back to: tier1_pass AND NOT B2.2.
+    verifier), falls back to: has_diff AND NOT B2.2.
     """
-    # Tier 1 must pass — logic error presupposes code that runs
-    if not verification.tier1_pass:
+    # A non-empty diff is a prerequisite — logic error presupposes code
+    # that actually runs.
+    if not verification.has_diff:
         return False
     # Tier 2 must have been configured and failed
     if verification.tier2_pass:
@@ -286,11 +287,11 @@ def detect_c2_premature_success(
 
     Conditions:
     1. llm_claimed_success == True (agent says it succeeded)
-    2. tier1_pass == False (Tier 1 basic check fails)
+    2. has_diff == False (agent didn't actually produce any diff)
     """
     if not llm_claimed_success:
         return False
-    return not verification.tier1_pass
+    return not verification.has_diff
 
 
 # ---------------------------------------------------------------------------
@@ -612,17 +613,19 @@ def assign_outcome_label(
     if verification.tier2_command and not verification.tier2_pass:
         return OutcomeLabel.FAILED
 
-    # 3. Weakly verified — Tier 1 passes, Tier 2 not configured
+    # 3. Weakly verified — agent produced a diff, Tier 2 not configured
     if not verification.tier2_command:
-        if verification.tier1_pass:
+        if verification.has_diff:
             return OutcomeLabel.WEAKLY_VERIFIED
         return OutcomeLabel.FAILED
 
-    # 4/5. Tier 1 + Tier 2 both pass
-    if verification.tier1_pass and verification.tier2_pass:
+    # 4/5. Diff produced AND Tier 2 passed — the AND matters because
+    # tier2 can legitimately pass with an empty diff (bug already fixed
+    # upstream); we don't want to credit the agent for that.
+    if verification.has_diff and verification.tier2_pass:
         if contains_recovery:
             return OutcomeLabel.VERIFIED_WITH_RECOVERY
         return OutcomeLabel.VERIFIED_ONE_SHOT
 
-    # Edge: tier2 passes but tier1 doesn't (shouldn't happen normally)
+    # Edge: tier2 passes but no diff (upstream-already-fixed case)
     return OutcomeLabel.FAILED

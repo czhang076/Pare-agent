@@ -23,7 +23,7 @@ def _record(
     *,
     llm_claimed_success: bool,
     final_passed: bool,
-    tier1_pass: bool,
+    has_diff: bool,
     tier2_pass: bool,
     tier2_command: str = "",
     attempts: list[StepAttempt] | None = None,
@@ -41,7 +41,7 @@ def _record(
         llm_claimed_success=llm_claimed_success,
         verification=VerificationResult(
             final_passed=final_passed,
-            tier1_pass=tier1_pass,
+            has_diff=has_diff,
             tier2_pass=tier2_pass,
             tier2_command=tier2_command,
         ),
@@ -97,7 +97,7 @@ class TestClassifyOne:
     def test_toxic_c2(self):
         """Agent claims success, tier1 fails → C2 → toxic."""
         rec = _record("t", llm_claimed_success=True,
-                       final_passed=False, tier1_pass=False, tier2_pass=False)
+                       final_passed=False, has_diff=False, tier2_pass=False)
         result = classify_one(rec)
         assert result.outcome.value == "toxic"
         assert result.liu.c2_premature_success is True
@@ -105,14 +105,14 @@ class TestClassifyOne:
     def test_weakly_verified(self):
         """Tier1 passes, no tier2 configured → weakly_verified."""
         rec = _record("w", llm_claimed_success=True,
-                       final_passed=True, tier1_pass=True, tier2_pass=False)
+                       final_passed=True, has_diff=True, tier2_pass=False)
         result = classify_one(rec)
         assert result.outcome.value == "weakly_verified"
 
     def test_verified_one_shot(self):
         """Both tiers pass, no recovery → verified_one_shot."""
         rec = _record("o", llm_claimed_success=True,
-                       final_passed=True, tier1_pass=True, tier2_pass=True,
+                       final_passed=True, has_diff=True, tier2_pass=True,
                        tier2_command="pytest tests/")
         result = classify_one(rec)
         assert result.outcome.value == "verified_one_shot"
@@ -124,7 +124,7 @@ class TestClassifyOne:
             _evt(1, 1, "bash", ok=True, content="ok", params_hash="fix"),
         ]
         rec = _record("r", llm_claimed_success=True,
-                       final_passed=True, tier1_pass=True, tier2_pass=True,
+                       final_passed=True, has_diff=True, tier2_pass=True,
                        tier2_command="pytest tests/",
                        tool_call_events=events)
         result = classify_one(rec)
@@ -157,7 +157,7 @@ class TestClassifyOne:
             "b11-real",
             llm_claimed_success=True,
             final_passed=True,
-            tier1_pass=True,
+            has_diff=True,
             tier2_pass=True,
             tier2_command="pytest tests/",
             tool_call_events=events,
@@ -185,7 +185,7 @@ class TestClassifyOne:
             "b11-legacy",
             llm_claimed_success=True,
             final_passed=False,
-            tier1_pass=True,
+            has_diff=True,
             tier2_pass=False,
             tier2_command="pytest tests/",
             tool_call_events=events,
@@ -201,7 +201,7 @@ class TestClassifyOne:
     def test_no_events_backward_compat(self):
         """v1 trajectory with 0 events classifies without error."""
         rec = _record("v1", llm_claimed_success=True,
-                       final_passed=True, tier1_pass=True, tier2_pass=False)
+                       final_passed=True, has_diff=True, tier2_pass=False)
         result = classify_one(rec)
         assert result.outcome.value == "weakly_verified"
         assert result.recovery.contains_recovery is False
@@ -219,21 +219,21 @@ class TestClassifyTrajectoriesScript:
                 "toxic",
                 llm_claimed_success=True,
                 final_passed=False,
-                tier1_pass=False,
+                has_diff=False,
                 tier2_pass=False,
             ),
             _record(
                 "weak",
                 llm_claimed_success=True,
                 final_passed=True,
-                tier1_pass=True,
+                has_diff=True,
                 tier2_pass=False,
             ),
             _record(
                 "one",
                 llm_claimed_success=True,
                 final_passed=True,
-                tier1_pass=True,
+                has_diff=True,
                 tier2_pass=True,
                 tier2_command="pytest tests/",
             ),
@@ -270,10 +270,10 @@ class TestClassifyTrajectoriesScript:
         trajectory_path = tmp_path / "traj.jsonl"
         records = [
             _record("a", llm_claimed_success=True,
-                    final_passed=True, tier1_pass=True, tier2_pass=True,
+                    final_passed=True, has_diff=True, tier2_pass=True,
                     tier2_command="pytest"),
             _record("b", llm_claimed_success=True,
-                    final_passed=True, tier1_pass=True, tier2_pass=True,
+                    final_passed=True, has_diff=True, tier2_pass=True,
                     tier2_command="pytest"),
         ]
         write_trajectory_jsonl(trajectory_path, records)
@@ -296,7 +296,7 @@ class TestClassifyTrajectoriesScript:
                     "one",
                     llm_claimed_success=True,
                     final_passed=True,
-                    tier1_pass=True,
+                    has_diff=True,
                     tier2_pass=True,
                     tier2_command="pytest",
                 )
