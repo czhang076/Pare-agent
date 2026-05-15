@@ -55,3 +55,6 @@ data/
 work_record.md
 gemini_work.md
 plan.md
+
+# Local-only debug / scratch scripts (underscore prefix in scripts/)
+scripts/_*.py

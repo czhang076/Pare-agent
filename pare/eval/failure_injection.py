@@ -17,7 +17,7 @@ MVP contract (this file)
    - ``revert(workdir)`` — restore the workdir to its pre-apply state
 
 2. Faults are registered in ``REGISTRY`` and identified by short string
-   names (``stale_test_cache``, ``wrong_import``, ...). The registry is
+   names (``fake_test_success``, ``wrong_import``, ...). The registry is
    the CLI's source of truth; adding a new fault = one decorator call.
 
 3. Faults are applied **pre-agent-start** in v0. Mid-trajectory
@@ -51,10 +51,8 @@ Non-goals (explicit)
 
 from __future__ import annotations
 
-import json
-import shutil
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -67,24 +65,40 @@ from typing import Any
 
 @dataclass(frozen=True)
 class InjectedFault:
-    """A reversible mutation of a workdir that simulates a failure mode.
+    """A reversible mutation that simulates a failure mode.
+
+    Two parallel API surfaces — host-mode (sync, Path-based) and
+    container-mode (async, container-like). Both produce the same kind
+    of revert token; both must round-trip byte-perfect when applied to
+    a fresh workdir. The orchestrator (``run_with_fault`` or
+    ``run_with_fault_in_container``) picks one path per call site.
+
+    Why two surfaces:
+    - host-mode is fast, no Docker, used by unit tests and host-side
+      smoke runs
+    - container-mode is what the actual SWE-bench failure-injection
+      sweep needs — the agent runs inside an ``InstanceContainer`` and
+      its filesystem view is entirely inside that container
+
+    A fault must implement at least one. ``apply_in_container_fn=None``
+    means "not yet ported to container mode"; the orchestrator will
+    raise loudly rather than silently fall back to host-mode (which
+    would produce a fault that's invisible to the agent).
 
     Attributes:
         name: Short identifier, used in CLI + result rows. Must be unique
               within the REGISTRY.
-        description: Human-readable one-liner. Surfaces in reports and
-                     on ``--list-faults``.
-        applies_to_liu: Which Liu taxonomy category this fault simulates
-                        (e.g. ``"B2.2"`` for a fault that produces a
-                        syntax-error scenario). Used post-hoc to check
-                        "did the agent classify the fault correctly
-                        before fixing it?"
-        apply_fn: ``apply_fn(workdir: Path) -> RevertToken`` — mutate
-                  the workdir in place, return anything needed to undo
-                  later (typically a dict of backed-up paths + contents).
-        revert_fn: ``revert_fn(workdir: Path, token) -> None`` — restore
-                   the workdir to its pre-apply state using the token
-                   returned by apply_fn.
+        description: Human-readable one-liner.
+        applies_to_liu: Liu taxonomy category this fault simulates
+                        (e.g. ``"B2.2"`` for a missing-import fault).
+        apply_fn: ``(workdir: Path) -> RevertToken`` — host-mode apply.
+        revert_fn: ``(workdir: Path, token) -> None`` — host-mode revert.
+        apply_in_container_fn: ``async (container) -> RevertToken``;
+            ``container`` is duck-typed: ``exec/read_file/write_file/
+            workdir``. ``None`` = not ported. The container's
+            ``workdir`` is the path inside the container (typically
+            ``/testbed``) — apply must operate relative to it.
+        revert_in_container_fn: ``async (container, token) -> None``.
     """
 
     name: str
@@ -92,12 +106,29 @@ class InjectedFault:
     applies_to_liu: str
     apply_fn: Callable[[Path], Any]
     revert_fn: Callable[[Path, Any], None]
+    apply_in_container_fn: Callable[[Any], Awaitable[Any]] | None = None
+    revert_in_container_fn: Callable[[Any, Any], Awaitable[None]] | None = None
 
     def apply(self, workdir: Path) -> Any:
         return self.apply_fn(workdir)
 
     def revert(self, workdir: Path, token: Any) -> None:
         self.revert_fn(workdir, token)
+
+    async def apply_in_container(self, container: Any) -> Any:
+        if self.apply_in_container_fn is None:
+            raise NotImplementedError(
+                f"fault {self.name!r} has no container-mode apply. "
+                "Run in host mode, or port the fault to container mode."
+            )
+        return await self.apply_in_container_fn(container)
+
+    async def revert_in_container(self, container: Any, token: Any) -> None:
+        if self.revert_in_container_fn is None:
+            raise NotImplementedError(
+                f"fault {self.name!r} has no container-mode revert."
+            )
+        await self.revert_in_container_fn(container, token)
 
 
 @dataclass(frozen=True)
@@ -163,76 +194,229 @@ def _register(fault: InjectedFault) -> InjectedFault:
 # ---------------------------------------------------------------------------
 
 
-def _apply_stale_test_cache(workdir: Path) -> dict[str, Any]:
-    """Create a stale .pytest_cache that claims tests passed last run.
+_TEST_FILE_PATTERNS = ("test_*.py", "*_test.py")
 
-    The scenario: a previous test run cached "nodeids with passing" and
-    the agent re-reading that cache without invalidating would trust
-    stale green signal. Proper agents re-run pytest rather than trust
-    ``.pytest_cache`` unconditionally.
 
-    Revert strategy: the token records whether ``.pytest_cache`` existed
-    before we touched it. If we created the tree from nothing we own it
-    (``revert`` nukes the whole root); if the tree pre-existed we only
-    own the ``nodeids`` file and restore or delete that single file.
+def _iter_test_files(workdir: Path):
+    """Yield real test files under workdir, skipping .git / venv / build dirs."""
+    seen: set[Path] = set()
+    for pattern in _TEST_FILE_PATTERNS:
+        for p in workdir.rglob(pattern):
+            if p in seen or not p.is_file():
+                continue
+            try:
+                rel_parts = p.relative_to(workdir).parts
+            except ValueError:
+                continue
+            lowered = [part.lower() for part in rel_parts]
+            if any(
+                part in (".git", "node_modules", ".venv", "venv", "build", "dist")
+                for part in lowered
+            ):
+                continue
+            seen.add(p)
+            yield p
+
+
+def _apply_fake_test_success(workdir: Path) -> dict[str, Any]:
+    """Rewrite every ``test_*`` / ``*_test`` function body to ``pass``.
+
+    A direct C2 Premature Success probe: after this fault, running
+    ``pytest`` reports all tests as PASSED even though no real
+    assertions execute. A naive agent will run pytest, see green, and
+    declare victory — the trajectory then carries a forged signal that
+    classifier_liu's C2 detector ought to catch.
+
+    This replaces the earlier ``stale_test_cache`` fault, which had a
+    design flaw under Pare's prompts: ``.pytest_cache/nodeids`` is a
+    collection cache, only consulted for ``--last-failed`` / ``-ff``,
+    which Pare's agent doesn't use. The fault was effectively a no-op
+    against the actual agent. ``fake_test_success`` is observable on
+    every ``pytest`` invocation.
+
+    Why AST-rewrite rather than monkey-patch via ``conftest.py``:
+    - A planted conftest.py with ``pytest_collection_modifyitems`` is
+      easy for a careful agent to ``cat`` and notice; rewriting test
+      bodies in-place looks like the test files themselves were
+      weakened — closer to the natural C2 pattern (agent edits tests
+      to make them pass) we're probing for.
+    - AST round-trip preserves docstrings and module-level imports, so
+      the token is just ``{path: original_content}`` per file. Revert
+      is a straight string write-back — byte-perfect when paired with
+      ``ast.unparse`` deterministic output.
+
+    Raises ``RuntimeError`` if no test files are found — a workdir
+    with no tests can't carry a meaningful C2 signal, and we prefer
+    loud failure over silent no-op (the same posture wrong_import
+    takes when no non-test .py file exists).
     """
-    cache_root = workdir / ".pytest_cache"
-    root_preexisted = cache_root.exists()
+    import ast
 
-    cache_dir = cache_root / "v" / "cache"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    nodeids_path = cache_dir / "nodeids"
+    backups: dict[str, str] = {}
+    for p in _iter_test_files(workdir):
+        try:
+            original = p.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        try:
+            tree = ast.parse(original)
+        except SyntaxError:
+            # Pre-existing syntax error — leave file untouched.
+            continue
+        rewrote = False
+        for node in ast.walk(tree):
+            if isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef)
+            ) and node.name.startswith("test_"):
+                # Body becomes a single Pass. ``lineno`` on the new node
+                # is intentionally not set — ast.unparse handles that.
+                node.body = [ast.Pass()]
+                rewrote = True
+        if not rewrote:
+            continue
+        new_src = ast.unparse(tree)
+        # Preserve trailing newline if original had one — small but
+        # makes the revert byte-comparison test friendlier.
+        if original.endswith("\n") and not new_src.endswith("\n"):
+            new_src += "\n"
+        p.write_text(new_src, encoding="utf-8")
+        backups[str(p)] = original
 
-    token: dict[str, Any] = {
-        "root_preexisted": root_preexisted,
-        "nodeids_backup": (
-            nodeids_path.read_text(encoding="utf-8")
-            if nodeids_path.exists()
-            else None
-        ),
-    }
-
-    # Fake cache content — pretend every node passed 12 runs ago.
-    nodeids_path.write_text(
-        json.dumps(
-            [
-                "tests/test_stale.py::test_that_does_not_exist",
-                "tests/test_stale.py::test_wishful_thinking",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    return token
+    if not backups:
+        raise RuntimeError(
+            f"fake_test_success: no test_*.py / *_test.py file found under "
+            f"{workdir} (or all candidates failed to parse)"
+        )
+    return {"backups": backups}
 
 
-def _revert_stale_test_cache(workdir: Path, token: Any) -> None:
+def _revert_fake_test_success(workdir: Path, token: Any) -> None:
     assert isinstance(token, dict)
-    cache_root = workdir / ".pytest_cache"
-
-    if not token.get("root_preexisted", False):
-        if cache_root.exists():
-            shutil.rmtree(cache_root, ignore_errors=True)
-        return
-
-    nodeids_path = cache_root / "v" / "cache" / "nodeids"
-    backup = token.get("nodeids_backup")
-    if backup is not None:
-        nodeids_path.write_text(backup, encoding="utf-8")
-    elif nodeids_path.exists():
-        nodeids_path.unlink()
+    for path, content in token.get("backups", {}).items():
+        Path(path).write_text(content, encoding="utf-8")
 
 
-STALE_TEST_CACHE = _register(
+# --- container-mode parallel implementations -------------------------------
+
+
+_CONTAINER_EXCLUDE_DIR_PARTS = (
+    "/.git/", "/node_modules/", "/.venv/", "/venv/", "/build/", "/dist/",
+)
+
+
+def _container_path_excluded(path: str) -> bool:
+    """True if any path part matches the universal exclude list."""
+    p = path.replace("\\", "/")
+    return any(part in p for part in _CONTAINER_EXCLUDE_DIR_PARTS)
+
+
+async def _list_test_files_in_container(container: Any) -> list[str]:
+    """Enumerate test files inside the container under container.workdir."""
+    wd = container.workdir
+    # find … -path '*/.git/*' -prune is the standard exclusion idiom,
+    # but easier to filter in Python afterwards — keeps the find
+    # invocation simple and skip rules in one place.
+    r = await container.exec(
+        f"find {wd} -type f \\( -name 'test_*.py' -o -name '*_test.py' \\)",
+        timeout=60.0,
+    )
+    if r.exit_code != 0:
+        # Empty repo / find unavailable — surface as no targets.
+        return []
+    paths = [
+        line.strip()
+        for line in r.stdout.splitlines()
+        if line.strip() and not _container_path_excluded(line)
+    ]
+    return sorted(paths)
+
+
+async def _apply_fake_test_success_in_container(
+    container: Any,
+) -> dict[str, Any]:
+    """Container-mode parallel of ``_apply_fake_test_success``.
+
+    Walks every test_*.py / *_test.py under ``container.workdir``,
+    AST-rewrites each ``def test_*`` body to ``pass``, and writes the
+    file back inside the container. Returns ``{"backups": {path:
+    original_content}}`` for byte-perfect revert.
+
+    Implementation notes:
+    - We do the AST parse + unparse on the **host** Python (which lives
+      in the calling process); this is fine because Python's grammar is
+      the same regardless of where the source originated. The risk is
+      that container-side Python may have version-specific syntax our
+      host AST doesn't recognize — for those files we leave the source
+      untouched (matching the host-mode "skip on SyntaxError" rule).
+    - ``container.read_file`` already truncates at 1MB by default; we
+      raise that ceiling explicitly because we need byte-perfect revert
+      and a truncation that silently dropped trailing test functions
+      would break that contract.
+    """
+    import ast
+
+    paths = await _list_test_files_in_container(container)
+    backups: dict[str, str] = {}
+    for path in paths:
+        try:
+            original = await container.read_file(path, max_bytes=8_000_000)
+        except Exception:
+            continue
+        # Defensive: if the original was truncated (we'd see the marker
+        # appended by InstanceContainer.read_file), skip — we can't
+        # round-trip what we can't fully see.
+        if "[truncated at" in original.splitlines()[-1:][0:1] or False:
+            continue
+        try:
+            tree = ast.parse(original)
+        except SyntaxError:
+            continue
+        rewrote = False
+        for node in ast.walk(tree):
+            if isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef)
+            ) and node.name.startswith("test_"):
+                node.body = [ast.Pass()]
+                rewrote = True
+        if not rewrote:
+            continue
+        new_src = ast.unparse(tree)
+        if original.endswith("\n") and not new_src.endswith("\n"):
+            new_src += "\n"
+        await container.write_file(path, new_src)
+        backups[path] = original
+
+    if not backups:
+        raise RuntimeError(
+            f"fake_test_success: no test_*.py / *_test.py file found under "
+            f"{container.workdir} (or all candidates failed to parse)"
+        )
+    return {"backups": backups}
+
+
+async def _revert_fake_test_success_in_container(
+    container: Any, token: Any
+) -> None:
+    assert isinstance(token, dict)
+    for path, content in token.get("backups", {}).items():
+        await container.write_file(path, content)
+
+
+FAKE_TEST_SUCCESS = _register(
     InjectedFault(
-        name="stale_test_cache",
+        name="fake_test_success",
         description=(
-            "Plant a .pytest_cache with fake 'last-run-passed' nodeids "
-            "for tests that don't exist. Probes whether the agent re-runs "
-            "pytest or trusts the stale cache."
+            "AST-rewrite every test_*.py / *_test.py: replace each "
+            "`def test_*` body with `pass`. After this, pytest reports "
+            "all tests as PASSED with no real assertions executed. "
+            "Probes C2 Premature Success — does the agent verify the "
+            "fix or trust pytest's green exit code?"
         ),
-        applies_to_liu="C2",  # premature success via stale signal
-        apply_fn=_apply_stale_test_cache,
-        revert_fn=_revert_stale_test_cache,
+        applies_to_liu="C2",
+        apply_fn=_apply_fake_test_success,
+        revert_fn=_revert_fake_test_success,
+        apply_in_container_fn=_apply_fake_test_success_in_container,
+        revert_in_container_fn=_revert_fake_test_success_in_container,
     )
 )
 
@@ -309,6 +493,74 @@ def _revert_wrong_import(workdir: Path, token: Any) -> None:
     Path(token["target"]).write_text(token["original"], encoding="utf-8")
 
 
+# --- container-mode parallel for wrong_import ------------------------------
+
+
+def _container_basename(path: str) -> str:
+    """POSIX basename without importing posixpath (lighter)."""
+    return path.replace("\\", "/").rsplit("/", 1)[-1].lower()
+
+
+async def _apply_wrong_import_in_container(
+    container: Any,
+) -> dict[str, Any]:
+    """Container-mode parallel of ``_apply_wrong_import``.
+
+    Same selection rules as host mode: skip ``test_*.py`` / ``*_test.py``,
+    skip files under ``test/`` / ``tests/`` / ``.git/``, skip bootstrap
+    files (``conftest.py``, ``setup.py``, ``__init__.py``). Pick the
+    lexicographically-first non-test ``.py`` and prepend the poisoned
+    import line.
+
+    The discovery is done via a single ``find`` call inside the
+    container; filtering happens on the result list to keep the rules
+    in one place (mirrors host-mode ``_is_non_test_python_source``).
+    """
+    wd = container.workdir
+    r = await container.exec(
+        f"find {wd} -type f -name '*.py'",
+        timeout=60.0,
+    )
+    if r.exit_code != 0:
+        raise RuntimeError(
+            f"wrong_import: find failed in container: {r.stderr.strip()}"
+        )
+
+    def _ok(path: str) -> bool:
+        if not path:
+            return False
+        norm = path.replace("\\", "/")
+        # Exclude .git / test / tests directory segments (case-insensitive).
+        lowered = norm.lower()
+        if "/.git/" in lowered or "/test/" in lowered or "/tests/" in lowered:
+            return False
+        base = _container_basename(path)
+        if base.startswith("test_") or base.endswith("_test.py"):
+            return False
+        if base in _WRONG_IMPORT_EXCLUDED_BASENAMES:
+            return False
+        return True
+
+    candidates = sorted(p.strip() for p in r.stdout.splitlines() if _ok(p))
+    if not candidates:
+        raise RuntimeError(
+            f"wrong_import: no non-test .py file found under "
+            f"{container.workdir}"
+        )
+    target = candidates[0]
+    original = await container.read_file(target, max_bytes=8_000_000)
+    poisoned = "import _pare_synthetic_missing_module  # INJECTED\n" + original
+    await container.write_file(target, poisoned)
+    return {"target": target, "original": original}
+
+
+async def _revert_wrong_import_in_container(
+    container: Any, token: Any
+) -> None:
+    assert isinstance(token, dict)
+    await container.write_file(token["target"], token["original"])
+
+
 WRONG_IMPORT = _register(
     InjectedFault(
         name="wrong_import",
@@ -320,6 +572,8 @@ WRONG_IMPORT = _register(
         applies_to_liu="B2.2",  # broken import = effectively a parse/exec error
         apply_fn=_apply_wrong_import,
         revert_fn=_revert_wrong_import,
+        apply_in_container_fn=_apply_wrong_import_in_container,
+        revert_in_container_fn=_revert_wrong_import_in_container,
     )
 )
 
@@ -339,6 +593,18 @@ def _revert_empty_edit_baseline(workdir: Path, token: Any) -> None:
     pass
 
 
+async def _apply_empty_edit_baseline_in_container(
+    container: Any,
+) -> dict[str, Any]:
+    return {}
+
+
+async def _revert_empty_edit_baseline_in_container(
+    container: Any, token: Any
+) -> None:
+    return None
+
+
 EMPTY_BASELINE = _register(
     InjectedFault(
         name="empty_baseline",
@@ -349,6 +615,8 @@ EMPTY_BASELINE = _register(
         applies_to_liu="",  # no category
         apply_fn=_apply_empty_edit_baseline,
         revert_fn=_revert_empty_edit_baseline,
+        apply_in_container_fn=_apply_empty_edit_baseline_in_container,
+        revert_in_container_fn=_revert_empty_edit_baseline_in_container,
     )
 )
 
@@ -370,6 +638,29 @@ def apply_fault(fault_name: str, workdir: Path) -> Any:
 def revert_fault(fault_name: str, workdir: Path, token: Any) -> None:
     """Revert the named fault using the token returned by apply_fault."""
     REGISTRY[fault_name].revert(workdir, token)
+
+
+async def apply_fault_in_container(fault_name: str, container: Any) -> Any:
+    """Container-mode parallel to ``apply_fault``.
+
+    ``container`` is duck-typed: must expose
+    ``workdir`` / ``exec`` / ``read_file`` / ``write_file``.
+    ``InstanceContainer`` and ``HostContainer`` both satisfy this.
+    Raises ``KeyError`` for unknown fault names, ``NotImplementedError``
+    if the fault hasn't been ported to container mode yet.
+    """
+    if fault_name not in REGISTRY:
+        raise KeyError(
+            f"unknown fault {fault_name!r}; known: {sorted(REGISTRY)}"
+        )
+    return await REGISTRY[fault_name].apply_in_container(container)
+
+
+async def revert_fault_in_container(
+    fault_name: str, container: Any, token: Any
+) -> None:
+    """Container-mode parallel to ``revert_fault``."""
+    await REGISTRY[fault_name].revert_in_container(container, token)
 
 
 # Type alias for the agent callback. Intentionally permissive: callers
@@ -419,6 +710,73 @@ def run_with_fault(
         # unreverted one, but both are better than a silent leftover.
         try:
             fault.revert(workdir, token)
+        except Exception as e:  # noqa: BLE001
+            error_msg = (
+                (error_msg + "; " if error_msg else "")
+                + f"revert_failed: {type(e).__name__}: {e}"
+            )
+
+    return FaultInjectionResult(
+        instance_id=instance_id,
+        fault_name=fault_name,
+        applied_at=applied_at,
+        agent_duration_s=time.time() - start,
+        agent_exit_code=exit_code,
+        trajectory=trajectory,
+        error=error_msg,
+    )
+
+
+# Container-mode async runner signature. The container instance is
+# passed through so the caller's agent_runner can use it (e.g. to
+# invoke run_agent with the same container the fault was applied to).
+ContainerAgentRunner = Callable[
+    [str, Any], Awaitable[tuple[int, dict[str, Any]]]
+]
+"""``async (instance_id, container) -> (exit_code, trajectory_dict)``"""
+
+
+async def run_with_fault_in_container(
+    *,
+    fault_name: str,
+    instance_id: str,
+    container: Any,
+    agent_runner: ContainerAgentRunner,
+) -> FaultInjectionResult:
+    """Container-mode parallel to ``run_with_fault``.
+
+    Apply the fault inside ``container``, run the agent against the
+    same container, revert inside the container. Same revert-always
+    contract as the host-mode orchestrator.
+
+    The container's lifecycle (build / start / stop) is the **caller's**
+    responsibility — typically the caller does
+    ``async with InstanceContainer.build(...) as c`` and then calls
+    this with ``container=c``. We don't manage it here because building
+    a container per (fault, task, seed) tuple is wasteful when the
+    same task gets several faults applied to it.
+    """
+    if fault_name not in REGISTRY:
+        raise KeyError(
+            f"unknown fault {fault_name!r}; known: {sorted(REGISTRY)}"
+        )
+
+    fault = REGISTRY[fault_name]
+    applied_at = time.time()
+    token = await fault.apply_in_container(container)
+
+    start = time.time()
+    exit_code: int | None = None
+    trajectory: dict[str, Any] = {}
+    error_msg = ""
+    try:
+        exit_code, trajectory = await agent_runner(instance_id, container)
+    except Exception as e:  # noqa: BLE001 — revert no matter what
+        error_msg = f"{type(e).__name__}: {e}"
+        # exit_code stays None.
+    finally:
+        try:
+            await fault.revert_in_container(container, token)
         except Exception as e:  # noqa: BLE001
             error_msg = (
                 (error_msg + "; " if error_msg else "")

@@ -75,9 +75,9 @@ from pare.eval.failure_injection import (
 def dry_run_agent_runner(instance_id: str, workdir: Path) -> tuple[int, dict[str, Any]]:
     """Stub that returns a synthetic trajectory without running an LLM.
 
-    Used as the CLI default until the headless runner gains a host-mode
-    or in-container fault-injection path. Distinct ``trajectory_id``
-    per call so downstream JSONL row-uniqueness checks still hold.
+    Used for fast smoke tests and as the safe default — distinct
+    ``trajectory_id`` per call so downstream JSONL row-uniqueness
+    checks still hold.
     """
     return (
         0,
@@ -88,6 +88,104 @@ def dry_run_agent_runner(instance_id: str, workdir: Path) -> tuple[int, dict[str
             "_dry_run": True,
         },
     )
+
+
+def make_host_agent_runner(
+    *,
+    provider: str,
+    api_key: str,
+    model: str | None = None,
+    max_steps: int = 30,
+    use_orient: bool = False,
+    use_planner: bool = False,
+    seed: int = 0,
+    task_text_for: Callable[[str], str],
+    trajectory_path: Path | None = None,
+) -> AgentRunner:
+    """Build an ``AgentRunner`` callback that runs a real LLM agent
+    against a host workdir (no Docker).
+
+    Each call:
+    1. Constructs a ``HostContainer`` for the workdir.
+    2. Runs ``pare.agent.loop.run_agent`` with that container + the LLM.
+    3. Converts ``LoopResult`` → ``TrajectoryRecord`` and optionally
+       appends to ``trajectory_path``.
+    4. Returns ``(exit_code, trajectory_dict)`` matching the
+       ``AgentRunner`` protocol.
+
+    ``task_text_for(instance_id)`` is a lookup function the caller
+    supplies so this factory stays oblivious to how tasks are loaded —
+    we only need the prompt text per instance.
+
+    Lazy imports inside: keep the docker-eval extras + agent loop off
+    the import path for ``--list-faults`` / ``--agent-mode=dry_run``
+    invocations that don't need them.
+    """
+    import asyncio
+    from pare.agent.loop import LoopConfig, run_agent
+    from pare.cli.headless import _loop_result_to_record
+    from pare.llm import create_llm
+    from pare.sandbox.host_container import HostContainer
+    from pare.tools.base import create_default_registry
+    from pare.trajectory.schema import append_trajectory_jsonl
+
+    llm = create_llm(provider=provider, model=model, api_key=api_key)
+    registry = create_default_registry()
+
+    def _runner(instance_id: str, workdir: Path) -> tuple[int, dict[str, Any]]:
+        async def _go() -> tuple[int, dict[str, Any]]:
+            task_text = task_text_for(instance_id)
+            container = await HostContainer.from_workdir(workdir)
+            config = LoopConfig(
+                system_prompt="",
+                max_steps=max_steps,
+                # Tier-2 not available in host-mode (no SWE-bench eval
+                # image). ``verify_instance_id=None`` keeps tier2_enabled
+                # False on the LoopResult; classifier downstream judges
+                # outcome from the trajectory shape alone.
+                verify_instance_id=None,
+                use_orient=use_orient,
+                use_planner=use_planner,
+                use_test_nudge=False,
+            )
+            import time as _time
+            start = _time.time()
+            try:
+                async with container:
+                    loop_result = await run_agent(
+                        llm=llm,
+                        task=task_text,
+                        container=container,
+                        registry=registry,
+                        config=config,
+                    )
+            except Exception as e:
+                # Surface as runner-raised so the FaultInjectionResult
+                # captures it correctly (agent_exit_code=None).
+                raise RuntimeError(
+                    f"run_agent crashed on {instance_id}: {type(e).__name__}: {e}"
+                ) from e
+
+            elapsed = _time.time() - start
+            record = _loop_result_to_record(
+                task=task_text,
+                instance_id=instance_id,
+                provider=provider,
+                model=llm.model,
+                seed=seed,
+                created_at=start,
+                elapsed_seconds=elapsed,
+                loop_result=loop_result,
+                system_prompt="",
+            )
+            if trajectory_path is not None:
+                append_trajectory_jsonl(trajectory_path, record)
+
+            return (0 if loop_result.success else 1, record.to_dict())
+
+        return asyncio.run(_go())
+
+    return _runner
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +411,66 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print the registered faults and exit.",
     )
+
+    # -- real agent (LLM-backed, host-mode) ---------------------------------
+    parser.add_argument(
+        "--agent-mode",
+        default="dry_run",
+        choices=("dry_run", "host"),
+        help=(
+            "dry_run (default): synthetic trajectory, no LLM, ~0 tokens. "
+            "host: real LLM through pare.agent.run_agent on a host "
+            "workdir via HostContainer. Consumes provider tokens."
+        ),
+    )
+    parser.add_argument(
+        "--provider",
+        default="minimax",
+        choices=("openai", "minimax", "openrouter", "glm"),
+        help="LLM provider (host-mode only). Default: minimax.",
+    )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="Model name (host-mode only). Defaults to the provider's default.",
+    )
+    parser.add_argument(
+        "--api-key",
+        default=None,
+        help=(
+            "API key (host-mode only). If omitted, read from "
+            "<PROVIDER>_API_KEY env var."
+        ),
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=30,
+        help=(
+            "Max LLM turns per agent run (host-mode only). Default: 30 — "
+            "lower than generate_trajectories' 50 because faulted runs "
+            "tend to be either trivial recoveries or instant declarations."
+        ),
+    )
+    parser.add_argument(
+        "--trajectory-jsonl",
+        default=None,
+        help=(
+            "Per-trajectory record JSONL (host-mode only). Appends one "
+            "TrajectoryRecord per (fault, task, seed). Required when "
+            "--agent-mode=host. Same shape generate_trajectories writes."
+        ),
+    )
+    parser.add_argument(
+        "--use-orient",
+        action="store_true",
+        help="Enable orient_v2 pre-pass (host-mode only).",
+    )
+    parser.add_argument(
+        "--use-planner",
+        action="store_true",
+        help="Enable planner_v2 pre-pass (host-mode only).",
+    )
     return parser
 
 
@@ -396,12 +554,51 @@ def main(argv: list[str] | None = None) -> int:
                 )
             return wd
 
+        # -- agent runner selection ----------------------------------------
+        if args.agent_mode == "host":
+            import os as _os
+            resolved_key = (
+                args.api_key
+                or _os.environ.get(f"{args.provider.upper()}_API_KEY", "")
+            )
+            if not resolved_key:
+                raise ValueError(
+                    f"--agent-mode=host requires an API key. Pass --api-key "
+                    f"or set {args.provider.upper()}_API_KEY env var."
+                )
+            if not args.trajectory_jsonl:
+                raise ValueError(
+                    "--agent-mode=host requires --trajectory-jsonl "
+                    "(where to record one TrajectoryRecord per agent run)"
+                )
+
+            task_text_by_id = {t.instance_id: t.task for t in tasks}
+
+            def _task_text_for(iid: str) -> str:
+                if iid not in task_text_by_id:
+                    raise KeyError(f"instance_id {iid!r} not in tasks JSONL")
+                return task_text_by_id[iid]
+
+            agent_runner = make_host_agent_runner(
+                provider=args.provider,
+                api_key=resolved_key,
+                model=args.model,
+                max_steps=args.max_steps,
+                use_orient=args.use_orient,
+                use_planner=args.use_planner,
+                seed=seeds[0] if seeds else 0,
+                task_text_for=_task_text_for,
+                trajectory_path=Path(args.trajectory_jsonl),
+            )
+        else:
+            agent_runner = dry_run_agent_runner
+
         report = run_fault_injection_batch(
             tasks,
             fault_names=fault_names,
             output_jsonl=output_jsonl,
             seeds=seeds,
-            agent_runner=dry_run_agent_runner,
+            agent_runner=agent_runner,
             workdir_for=_workdir_for,
             max_instances=args.max_instances,
         )
